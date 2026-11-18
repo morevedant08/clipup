@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
 from app.config import Settings, get_settings
+
+if TYPE_CHECKING:
+    from app.models.job import Job
 
 logger = logging.getLogger(__name__)
 
@@ -346,3 +352,55 @@ class YouTubeService:
             published_at=snippet.get("publishedAt"),
             thumbnail_url=thumb_url,
         )
+
+
+def download_rights_verified_video(job: Job, output_dir: Path) -> Path:
+    """Download a YouTube video via yt-dlp ONLY after enforcing the Rights Gate.
+
+    Raises RightsGateError if the job has not passed the Rights Gate.
+    """
+    from app.services.rights import assert_job_rights_approved
+
+    # NON-NEGOTIABLE GUARD: never invoke yt-dlp without verified rights
+    assert_job_rights_approved(job)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_template = str(output_dir / f"{job.youtube_video_id}.%(ext)s")
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--no-playlist",
+        "-f",
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        output_template,
+        job.source_url,
+    ]
+    logger.info("Downloading rights-verified video %s for job %s", job.youtube_video_id, job.id)
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        stderr_hint = (
+            exc.stderr[-400:]
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr
+            else str(exc)
+        )
+        raise YouTubeAPIError(f"yt-dlp download failed: {stderr_hint}") from exc
+
+    expected_mp4 = output_dir / f"{job.youtube_video_id}.mp4"
+    if expected_mp4.is_file():
+        return expected_mp4
+
+    candidates = sorted(output_dir.glob(f"{job.youtube_video_id}.*"))
+    if not candidates:
+        raise YouTubeAPIError("yt-dlp completed but no video file was produced.")
+    return candidates[0]
