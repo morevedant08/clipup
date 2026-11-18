@@ -1,1 +1,30 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
 
+# Storage & generated media
+storage/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+*.db
+*.sqlite3
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+.DS_Store
