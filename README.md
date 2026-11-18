@@ -15,6 +15,15 @@ No clipping job can be queued, downloaded, or processed unless the source video 
 
 If none match, the job is saved with `status = "rejected"`, a human-readable `rejection_reason`, full `rights_evidence_json`, and an `audit_log` entry. It is never enqueued to Celery.
 
+### Optional Source File Upload Path
+
+`POST /api/jobs` accepts either JSON (to download the YouTube URL via `yt-dlp` after rights verification) or `multipart/form-data` with an optional `source_file` (`.mp4`, `.mov`, or `.webm`, capped by `MAX_UPLOAD_SIZE_MB`, default `500` MB):
+
+- **Rights Gate still runs first** on the YouTube URL. If the URL fails the Rights Gate, any uploaded file is immediately discarded and never written to disk.
+- Validated files (checked by extension, MIME type, container magic bytes, and streaming byte limit) are stored under `${STORAGE_ROOT}/uploads/<job_id>/source.<ext>` outside any public directory, and file contents are never logged.
+- When a job uses an uploaded source file, `audit_log` records `job.source_uploaded` and `job.source_ready`, and the Celery worker skips `yt-dlp` and runs the configured `ClipEngine` directly on the uploaded file.
+- In the UI, the **New Clipping Job** form includes an optional **Upload source file instead of downloading** picker, and jobs that fail due to YouTube sign-in, bot-check, or rate-limit blocks display a hint suggesting the upload fallback.
+
 ## Project Structure
 
 ```text
@@ -119,16 +128,17 @@ npm run build
 In Google Cloud Console:
 1. Enable **YouTube Data API v3**.
 2. Create an OAuth 2.0 Web Application client.
-3. Add Authorized Redirect URIs:
-   - `http://localhost:8000/api/auth/google/callback`
-   - `http://localhost:8000/api/auth/youtube/callback`
-4. Phase 1 requests ONLY `openid`, `email`, `profile`, and `https://www.googleapis.com/auth/youtube.readonly`. Upload scopes (`youtube.upload`) are intentionally prohibited at this stage.
+3. Add the exact Authorized Redirect URI:
+   - `http://localhost:8000/auth/google/callback`
+4. Both Google sign-in (`google_login`) and read-only YouTube channel connection (`youtube_connect`) share `/auth/google/callback` using a signed, short-lived, `HttpOnly`-cookie session-bound `state` token.
+5. Phase 1 requests ONLY `openid`, `email`, `profile`, and `https://www.googleapis.com/auth/youtube.readonly`. Upload scopes (`youtube.upload`) are intentionally prohibited at this stage.
 
 ## Core API Endpoints
 
 - `GET /health`, `GET /health/ready`
-- `GET /api/auth/google/login`, `GET /api/auth/google/callback`, `GET /api/auth/me`
-- `GET /api/auth/youtube/connect`, `GET /api/auth/youtube/callback`, `GET /api/auth/youtube/channels`
+- `GET /auth/google/callback` (root-level shared OAuth callback redirecting back to `http://localhost:3000`)
+- `GET /api/auth/google/login`, `GET /api/auth/me`
+- `GET /api/auth/youtube/connect`, `GET /api/auth/youtube/channels`, `DELETE /api/auth/youtube/channels/{channel_id}`
 - `POST /api/campaigns`, `GET /api/campaigns`, `GET /api/campaigns/{id}`, `PATCH /api/campaigns/{id}`, `DELETE /api/campaigns/{id}`
 - `POST /api/campaigns/{id}/sources`, `DELETE /api/campaigns/{id}/sources/{source_id}`
 - `POST /api/permissions`, `GET /api/permissions`, `POST /api/permissions/{id}/revoke`

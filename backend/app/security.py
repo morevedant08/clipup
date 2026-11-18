@@ -1,10 +1,12 @@
-"""Security utilities: JWT session tokens, OAuth state signing, and Fernet token encryption."""
+"""Security utilities: JWT session tokens, session-bound OAuth state signing, and Fernet encryption."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import logging
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,6 +17,10 @@ from cryptography.fernet import Fernet, InvalidToken
 from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_OAUTH_PURPOSES: frozenset[str] = frozenset({"google_login", "youtube_connect"})
+OAUTH_SESSION_COOKIE_NAME = "clipper_oauth_session"
+OAUTH_STATE_TTL_MINUTES = 10
 
 
 class SecurityConfigError(RuntimeError):
@@ -30,7 +36,7 @@ class TokenCipher:
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> TokenCipher:
-        """Build a TokenCipher from application settings.
+        """Build a TokenCipher from TOKEN_ENCRYPTION_KEY environment variable.
 
         In production, TOKEN_ENCRYPTION_KEY must be explicitly provided.
         In non-production environments, falls back to a key derived from JWT_SECRET_KEY
@@ -62,6 +68,11 @@ class TokenCipher:
             return self._fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
         except InvalidToken as exc:
             raise ValueError("Failed to decrypt stored refresh token.") from exc
+
+
+def generate_oauth_session_id() -> str:
+    """Generate a cryptographically secure per-flow OAuth session identifier."""
+    return secrets.token_urlsafe(32)
 
 
 def create_access_token(
@@ -101,15 +112,28 @@ def decode_access_token(
 def create_oauth_state(
     purpose: str,
     *,
+    session_id: str,
     user_id: uuid.UUID | None = None,
-    expires_minutes: int = 10,
+    expires_minutes: int = OAUTH_STATE_TTL_MINUTES,
     settings: Settings | None = None,
 ) -> str:
-    """Create a short-lived signed OAuth state token for CSRF protection."""
+    """Create a short-lived, signed, session-bound OAuth state token.
+
+    Rejects unknown or missing purpose values at creation time.
+    """
+    if purpose not in ALLOWED_OAUTH_PURPOSES:
+        raise ValueError(f"Unsupported OAuth state purpose: '{purpose}'.")
+    if not session_id:
+        raise ValueError("OAuth state must be bound to a non-empty session_id.")
+    if purpose == "youtube_connect" and user_id is None:
+        raise ValueError("youtube_connect OAuth state requires user_id.")
+
     cfg = settings or get_settings()
     now = datetime.now(timezone.utc)
     payload: dict[str, Any] = {
+        "type": "oauth_state",
         "purpose": purpose,
+        "sid": session_id,
         "nonce": uuid.uuid4().hex,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=expires_minutes)).timestamp()),
@@ -121,17 +145,43 @@ def create_oauth_state(
 
 def verify_oauth_state(
     state: str,
-    expected_purpose: str,
+    *,
+    session_id: str | None,
+    expected_purpose: str | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """Verify a signed OAuth state token and assert its purpose."""
+    """Verify a signed, short-lived, session-bound OAuth state token.
+
+    Rejects tampered signatures, expired tokens, missing/unknown purpose values,
+    and missing or mismatched session cookies.
+    """
     cfg = settings or get_settings()
     payload = jwt.decode(
         state,
         cfg.jwt_secret_key,
         algorithms=[cfg.jwt_algorithm],
+        options={"require": ["exp", "iat", "purpose", "sid", "type"]},
     )
-    if payload.get("purpose") != expected_purpose:
-        raise jwt.InvalidTokenError("OAuth state purpose mismatch.")
-    return payload
 
+    if payload.get("type") != "oauth_state":
+        raise jwt.InvalidTokenError("Invalid OAuth state token type.")
+
+    purpose = payload.get("purpose")
+    if not isinstance(purpose, str) or purpose not in ALLOWED_OAUTH_PURPOSES:
+        raise jwt.InvalidTokenError("Unknown or missing OAuth state purpose.")
+
+    if expected_purpose is not None and purpose != expected_purpose:
+        raise jwt.InvalidTokenError("OAuth state purpose mismatch.")
+
+    token_sid = payload.get("sid")
+    if (
+        not session_id
+        or not isinstance(token_sid, str)
+        or not hmac.compare_digest(token_sid, session_id)
+    ):
+        raise jwt.InvalidTokenError("OAuth state is not bound to the current browser session.")
+
+    if purpose == "youtube_connect" and not payload.get("uid"):
+        raise jwt.InvalidTokenError("YouTube connect state is missing user binding.")
+
+    return payload

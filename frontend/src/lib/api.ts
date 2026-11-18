@@ -58,6 +58,7 @@ async function apiFetch<T>(
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers,
+    credentials: "include",
     cache: "no-store",
   });
 
@@ -155,6 +156,23 @@ export async function uploadPermissionDocument(
   });
 }
 
+export function shouldSuggestFileUpload(
+  errorMessage: string | null | undefined
+): boolean {
+  if (!errorMessage) return false;
+  const lower = errorMessage.toLowerCase();
+  return (
+    lower.includes("sign-in") ||
+    lower.includes("sign in") ||
+    lower.includes("bot check") ||
+    lower.includes("not a bot") ||
+    lower.includes("rate-limit") ||
+    lower.includes("rate limit") ||
+    lower.includes("too many requests") ||
+    lower.includes("age verification")
+  );
+}
+
 // --- Jobs & Clips ---
 
 export async function createJob(payload: {
@@ -165,10 +183,34 @@ export async function createJob(payload: {
     clip_duration_sec: number;
     aspect_ratio: "9:16";
   };
+  source_file?: File | null;
 }): Promise<JobItem> {
+  if (payload.source_file) {
+    const formData = new FormData();
+    formData.append("source_url", payload.source_url);
+    if (payload.campaign_id) {
+      formData.append("campaign_id", payload.campaign_id);
+    }
+    formData.append("clip_count", String(payload.settings.clip_count));
+    formData.append(
+      "clip_duration_sec",
+      String(payload.settings.clip_duration_sec)
+    );
+    formData.append("aspect_ratio", payload.settings.aspect_ratio);
+    formData.append("source_file", payload.source_file);
+    return apiFetch<JobItem>("/api/jobs", {
+      method: "POST",
+      body: formData,
+    });
+  }
+
   return apiFetch<JobItem>("/api/jobs", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      source_url: payload.source_url,
+      campaign_id: payload.campaign_id ?? null,
+      settings: payload.settings,
+    }),
   });
 }
 

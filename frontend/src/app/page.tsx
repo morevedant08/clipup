@@ -31,6 +31,18 @@ export default function HomePage() {
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [oauthNotice, setOauthNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("youtube_connected") === "1") {
+      const count = params.get("channels") || "1";
+      setOauthNotice(
+        `Connected ${count} YouTube channel(s) with read-only permissions.`
+      );
+      window.history.replaceState(null, "", "/");
+    }
+  }, []);
 
   const loadWorkspaceData = useCallback(async () => {
     setRefreshing(true);
@@ -143,6 +155,18 @@ export default function HomePage() {
     <div className="min-h-screen">
       <Navbar user={user} onLogout={handleLogout} />
       <main className="mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6">
+        {oauthNotice && (
+          <div className="flex items-center justify-between rounded-xl border border-emerald-800/70 bg-emerald-950/60 px-4 py-3 text-xs text-emerald-200">
+            <span>{oauthNotice}</span>
+            <button
+              type="button"
+              onClick={() => setOauthNotice(null)}
+              className="text-emerald-300 hover:text-white"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <NewJobForm campaigns={campaigns} onJobCreated={handleJobCreated} />
 
         <RightsSetupPanel

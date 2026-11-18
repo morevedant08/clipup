@@ -1,5 +1,6 @@
 "use client";
 
+import { shouldSuggestFileUpload } from "@/lib/api";
 import type { JobItem } from "@/lib/types";
 import { RightsBasisBadge, StatusBadge } from "./Badges";
 
@@ -72,6 +73,11 @@ export function JobsList({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-1.5">
+                    {job.source_mode === "uploaded_file" && (
+                      <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800/80 px-2 py-0.5 text-[11px] font-medium text-slate-200">
+                        Uploaded File
+                      </span>
+                    )}
                     <StatusBadge status={job.status} />
                     <RightsBasisBadge basis={job.rights_basis} />
                   </div>
@@ -84,9 +90,14 @@ export function JobsList({
                 )}
 
                 {job.status === "failed" && job.error_message && (
-                  <p className="mt-2.5 rounded-lg border border-red-900/70 bg-red-950/40 px-3 py-2 text-xs text-red-200">
-                    {job.error_message}
-                  </p>
+                  <div className="mt-2.5 rounded-lg border border-red-900/70 bg-red-950/40 px-3 py-2 text-xs text-red-200">
+                    <p className="line-clamp-2">{job.error_message}</p>
+                    {shouldSuggestFileUpload(job.error_message) && (
+                      <p className="mt-1 text-[11px] text-amber-200">
+                        Tip: Resubmit this YouTube URL using &ldquo;Upload source file instead of downloading&rdquo; above.
+                      </p>
+                    )}
+                  </div>
                 )}
               </button>
             );

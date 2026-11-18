@@ -351,3 +351,23 @@ def test_assert_job_rights_approved_blocks_unapproved_jobs() -> None:
     )
     assert_job_rights_approved(valid_job)
 
+
+def test_cc_job_without_attribution_is_blocked_by_rights_gate() -> None:
+    """Explicitly verify that a Creative Commons job missing attribution text cannot proceed."""
+    cc_without_attribution = Job(
+        id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        source_url="https://www.youtube.com/watch?v=ccVideo1234",
+        youtube_video_id="ccVideo1234",
+        rights_basis=RightsBasis.CC.value,
+        rights_evidence_json={
+            "allowed": True,
+            "basis": "cc",
+            "requires_attribution": True,
+            "attribution_text": "",
+        },
+        status=JobStatus.QUEUED.value,
+    )
+    with pytest.raises(RightsGateError, match="attribution"):
+        assert_job_rights_approved(cc_without_attribution)
+

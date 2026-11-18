@@ -1,7 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { buildMediaUrl, updateClipReview } from "@/lib/api";
+import {
+  buildMediaUrl,
+  shouldSuggestFileUpload,
+  updateClipReview,
+} from "@/lib/api";
 import type { ClipItem, JobItem, ReviewStatus } from "@/lib/types";
 import { ReviewBadge, RightsBasisBadge, StatusBadge } from "./Badges";
 
@@ -52,6 +56,11 @@ export function ClipPreviewGrid({ job, onClipUpdated }: ClipPreviewGridProps) {
           </a>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {job.source_mode === "uploaded_file" && (
+            <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800/80 px-2.5 py-0.5 text-xs font-medium text-slate-200">
+              Uploaded Source{job.uploaded_filename ? `: ${job.uploaded_filename}` : ""}
+            </span>
+          )}
           <StatusBadge status={job.status} />
           <RightsBasisBadge basis={job.rights_basis} />
         </div>
@@ -68,8 +77,24 @@ export function ClipPreviewGrid({ job, onClipUpdated }: ClipPreviewGridProps) {
 
       {job.status === "failed" && job.error_message && (
         <div className="mb-4 rounded-xl border border-red-800/80 bg-red-950/60 p-4 text-xs text-red-200">
-          <p className="mb-1 font-semibold text-red-100">Processing Failure</p>
-          <p>{job.error_message}</p>
+          <p className="mb-1 font-semibold text-red-100">Processing Failed</p>
+          <p className="leading-relaxed">
+            {job.error_message.length > 240
+              ? `${job.error_message.slice(0, 237)}...`
+              : job.error_message}
+          </p>
+          {shouldSuggestFileUpload(job.error_message) && (
+            <p className="mt-2 rounded-lg border border-amber-800/70 bg-amber-950/50 px-3 py-2 text-amber-200">
+              YouTube blocked automated downloading for this video. You can still process it by pasting the same YouTube URL and selecting{" "}
+              <span className="font-semibold">
+                Upload source file instead of downloading
+              </span>{" "}
+              in the New Clipping Job form above.
+            </p>
+          )}
+          <p className="mt-1.5 text-[11px] text-red-300/75">
+            Check worker logs for full diagnostic details.
+          </p>
         </div>
       )}
 

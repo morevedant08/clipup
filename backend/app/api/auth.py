@@ -1,4 +1,10 @@
-"""Google OAuth login and read-only YouTube channel connection endpoints."""
+"""Google OAuth login and read-only YouTube channel connection endpoints.
+
+The shared OAuth callback is registered at the application root:
+    GET /auth/google/callback  ->  http://localhost:8000/auth/google/callback
+and handles both `google_login` and `youtube_connect` flows using a signed,
+short-lived, session-cookie-bound `state` token.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +13,8 @@ import uuid
 from urllib.parse import urlencode
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_youtube_service
@@ -24,9 +30,12 @@ from app.schemas.auth import (
     YouTubeChannelResponse,
 )
 from app.security import (
+    OAUTH_SESSION_COOKIE_NAME,
+    OAUTH_STATE_TTL_MINUTES,
     TokenCipher,
     create_access_token,
     create_oauth_state,
+    generate_oauth_session_id,
     verify_oauth_state,
 )
 from app.services.audit import record_audit
@@ -39,14 +48,43 @@ from app.services.youtube import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+oauth_callback_router = APIRouter(tags=["auth"])
+
+
+def _set_oauth_session_cookie(response: Response, session_id: str) -> None:
+    """Bind the OAuth flow to the caller's browser via an HttpOnly SameSite=Lax cookie."""
+    settings = get_settings()
+    response.set_cookie(
+        key=OAUTH_SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=OAUTH_STATE_TTL_MINUTES * 60,
+        httponly=True,
+        samesite="lax",
+        secure=settings.app_env.lower() == "production",
+        path="/",
+    )
+
+
+def _clear_oauth_session_cookie(response: Response) -> None:
+    """Clear the one-time OAuth session binding cookie after callback completion."""
+    settings = get_settings()
+    response.delete_cookie(
+        key=OAUTH_SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.app_env.lower() == "production",
+    )
 
 
 @router.get("/google/login", response_model=OAuthUrlResponse)
 def google_login_url(
+    response: Response,
     youtube_service: YouTubeService = Depends(get_youtube_service),
 ) -> OAuthUrlResponse:
-    """Return the Google OAuth 2.0 login URL with a signed CSRF state token."""
-    state = create_oauth_state("google_login")
+    """Return Google OAuth 2.0 login URL with a signed, short-lived, session-bound state."""
+    session_id = generate_oauth_session_id()
+    state = create_oauth_state("google_login", session_id=session_id)
     try:
         auth_url = youtube_service.build_google_login_url(state)
     except YouTubeAPIError as exc:
@@ -54,27 +92,44 @@ def google_login_url(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
+
+    _set_oauth_session_cookie(response, session_id)
     return OAuthUrlResponse(auth_url=auth_url)
 
 
-@router.get("/google/callback")
-def google_login_callback(
-    code: str = Query(..., min_length=1),
-    state: str = Query(..., min_length=1),
-    mode: str = Query(default="redirect", pattern="^(redirect|json)$"),
-    db: Session = Depends(get_db),
+@router.get("/youtube/connect", response_model=OAuthUrlResponse)
+def youtube_connect_url(
+    response: Response,
+    current_user: User = Depends(get_current_user),
     youtube_service: YouTubeService = Depends(get_youtube_service),
-):
-    """Handle Google OAuth callback, upsert user, and issue a Clipper JWT."""
-    settings = get_settings()
+) -> OAuthUrlResponse:
+    """Return Google OAuth URL requesting read-only YouTube access (no upload scope)."""
+    session_id = generate_oauth_session_id()
+    state = create_oauth_state(
+        "youtube_connect",
+        session_id=session_id,
+        user_id=current_user.id,
+    )
     try:
-        verify_oauth_state(state, expected_purpose="google_login")
-    except jwt.PyJWTError as exc:
+        auth_url = youtube_service.build_youtube_connect_url(state)
+    except YouTubeAPIError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired OAuth state parameter.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
         ) from exc
 
+    _set_oauth_session_cookie(response, session_id)
+    return OAuthUrlResponse(auth_url=auth_url)
+
+
+def _handle_google_login_callback(
+    *,
+    code: str,
+    mode: str,
+    db: Session,
+    youtube_service: YouTubeService,
+) -> Response:
+    settings = get_settings()
     try:
         tokens = youtube_service.exchange_code_for_tokens(
             code=code,
@@ -128,93 +183,28 @@ def google_login_callback(
 
     jwt_token = create_access_token(user.id, user.email)
     if mode == "json":
-        return AuthTokenResponse(
+        payload = AuthTokenResponse(
             access_token=jwt_token,
             user=UserResponse.model_validate(user),
         )
+        return JSONResponse(content=payload.model_dump(mode="json"))
 
     # Pass token in URL fragment so it is never sent in HTTP Referer or proxy logs
-    redirect_target = f"{settings.frontend_url.rstrip('/')}/auth/callback#token={jwt_token}"
+    redirect_target = (
+        f"{settings.frontend_url.rstrip('/')}/auth/callback#token={jwt_token}"
+    )
     return RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
 
 
-@router.post("/dev-login", response_model=AuthTokenResponse)
-def dev_login(
-    body: DevLoginRequest,
-    db: Session = Depends(get_db),
-) -> AuthTokenResponse:
-    """Local development-only login endpoint (disabled unless ENABLE_DEV_AUTH=true)."""
+def _handle_youtube_connect_callback(
+    *,
+    code: str,
+    user_id: uuid.UUID,
+    mode: str,
+    db: Session,
+    youtube_service: YouTubeService,
+) -> Response:
     settings = get_settings()
-    if not settings.enable_dev_auth or settings.app_env.lower() == "production":
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Not found.",
-        )
-
-    user = db.query(User).filter(User.email == str(body.email)).first()
-    if user is None:
-        user = User(email=str(body.email), name=body.name)
-        db.add(user)
-        db.flush()
-
-    record_audit(
-        db,
-        "auth.dev_login",
-        user_id=user.id,
-        details={"email": user.email},
-    )
-    db.commit()
-    db.refresh(user)
-
-    token = create_access_token(user.id, user.email)
-    return AuthTokenResponse(
-        access_token=token,
-        user=UserResponse.model_validate(user),
-    )
-
-
-@router.get("/me", response_model=UserResponse)
-def get_me(current_user: User = Depends(get_current_user)) -> UserResponse:
-    """Return the authenticated user's profile and connected YouTube channels."""
-    return UserResponse.model_validate(current_user)
-
-
-@router.get("/youtube/connect", response_model=OAuthUrlResponse)
-def youtube_connect_url(
-    current_user: User = Depends(get_current_user),
-    youtube_service: YouTubeService = Depends(get_youtube_service),
-) -> OAuthUrlResponse:
-    """Return the Google OAuth URL requesting read-only YouTube access (no upload scope)."""
-    state = create_oauth_state("youtube_connect", user_id=current_user.id)
-    try:
-        auth_url = youtube_service.build_youtube_connect_url(state)
-    except YouTubeAPIError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    return OAuthUrlResponse(auth_url=auth_url)
-
-
-@router.get("/youtube/callback")
-def youtube_connect_callback(
-    code: str = Query(..., min_length=1),
-    state: str = Query(..., min_length=1),
-    mode: str = Query(default="redirect", pattern="^(redirect|json)$"),
-    db: Session = Depends(get_db),
-    youtube_service: YouTubeService = Depends(get_youtube_service),
-):
-    """Complete read-only YouTube channel connection and store encrypted refresh tokens."""
-    settings = get_settings()
-    try:
-        state_payload = verify_oauth_state(state, expected_purpose="youtube_connect")
-        user_id = uuid.UUID(str(state_payload["uid"]))
-    except (jwt.PyJWTError, KeyError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired YouTube OAuth state.",
-        ) from exc
-
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(
@@ -225,7 +215,7 @@ def youtube_connect_callback(
     try:
         tokens = youtube_service.exchange_code_for_tokens(
             code=code,
-            redirect_uri=settings.youtube_connect_redirect_uri,
+            redirect_uri=settings.google_oauth_redirect_uri,
         )
     except YouTubeAPIError as exc:
         raise HTTPException(
@@ -238,7 +228,10 @@ def youtube_connect_callback(
     if not FORBIDDEN_UPLOAD_SCOPES.isdisjoint(granted_scopes):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Unexpected write/upload YouTube scope granted; only read-only scope is permitted.",
+            detail=(
+                "Unexpected write/upload YouTube scope granted; "
+                "only read-only scope is permitted."
+            ),
         )
 
     access_token = tokens.get("access_token")
@@ -251,7 +244,10 @@ def youtube_connect_callback(
     if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Google OAuth did not return a refresh token. Please reconnect and grant consent.",
+            detail=(
+                "Google OAuth did not return a refresh token. "
+                "Please reconnect and grant consent."
+            ),
         )
 
     try:
@@ -311,11 +307,16 @@ def youtube_connect_callback(
         },
     )
     db.commit()
+    db.expire(user, ["youtube_channels"])
     for rec in saved_channels:
         db.refresh(rec)
 
     if mode == "json":
-        return [YouTubeChannelResponse.model_validate(rec) for rec in saved_channels]
+        payload = [
+            YouTubeChannelResponse.model_validate(rec).model_dump(mode="json")
+            for rec in saved_channels
+        ]
+        return JSONResponse(content=payload)
 
     params = urlencode({"youtube_connected": "1", "channels": len(saved_channels)})
     return RedirectResponse(
@@ -324,15 +325,121 @@ def youtube_connect_callback(
     )
 
 
+@oauth_callback_router.get("/auth/google/callback")
+def google_oauth_callback(
+    request: Request,
+    code: str = Query(..., min_length=1),
+    state: str = Query(..., min_length=1),
+    mode: str = Query(default="redirect", pattern="^(redirect|json)$"),
+    db: Session = Depends(get_db),
+    youtube_service: YouTubeService = Depends(get_youtube_service),
+) -> Response:
+    """Shared root-level Google OAuth callback (http://localhost:8000/auth/google/callback).
+
+    Validates the signed, short-lived, session-bound `state` token and dispatches
+    based on its verified `purpose` (`google_login` or `youtube_connect`).
+    """
+    session_cookie = request.cookies.get(OAUTH_SESSION_COOKIE_NAME)
+    try:
+        state_payload = verify_oauth_state(state, session_id=session_cookie)
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OAuth state token has expired. Please try signing in again.",
+        ) from exc
+    except jwt.PyJWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or session-mismatched OAuth state parameter.",
+        ) from exc
+
+    purpose = state_payload["purpose"]
+    if purpose == "google_login":
+        resp = _handle_google_login_callback(
+            code=code,
+            mode=mode,
+            db=db,
+            youtube_service=youtube_service,
+        )
+    elif purpose == "youtube_connect":
+        try:
+            user_id = uuid.UUID(str(state_payload["uid"]))
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid user identifier in OAuth state.",
+            ) from exc
+        resp = _handle_youtube_connect_callback(
+            code=code,
+            user_id=user_id,
+            mode=mode,
+            db=db,
+            youtube_service=youtube_service,
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported OAuth state purpose.",
+        )
+
+    _clear_oauth_session_cookie(resp)
+    return resp
+
+
+@router.post("/dev-login", response_model=AuthTokenResponse)
+def dev_login(
+    body: DevLoginRequest,
+    db: Session = Depends(get_db),
+) -> AuthTokenResponse:
+    """Local development-only login endpoint (disabled unless ENABLE_DEV_AUTH=true)."""
+    settings = get_settings()
+    if not settings.enable_dev_auth or settings.app_env.lower() == "production":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found.",
+        )
+
+    user = db.query(User).filter(User.email == str(body.email)).first()
+    if user is None:
+        user = User(email=str(body.email), name=body.name)
+        db.add(user)
+        db.flush()
+
+    record_audit(
+        db,
+        "auth.dev_login",
+        user_id=user.id,
+        details={"email": user.email},
+    )
+    db.commit()
+    db.refresh(user)
+
+    token = create_access_token(user.id, user.email)
+    return AuthTokenResponse(
+        access_token=token,
+        user=UserResponse.model_validate(user),
+    )
+
+
+@router.get("/me", response_model=UserResponse)
+def get_me(current_user: User = Depends(get_current_user)) -> UserResponse:
+    """Return the authenticated user's profile and connected YouTube channels."""
+    return UserResponse.model_validate(current_user)
+
+
 @router.get("/youtube/channels", response_model=list[YouTubeChannelResponse])
 def list_connected_channels(
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> list[YouTubeChannelResponse]:
     """List the current user's connected YouTube channels."""
-    return [
-        YouTubeChannelResponse.model_validate(channel)
-        for channel in current_user.youtube_channels
-    ]
+    channels = (
+        db.query(YouTubeChannel)
+        .filter(YouTubeChannel.user_id == current_user.id)
+        .order_by(YouTubeChannel.connected_at.desc())
+        .all()
+    )
+    return [YouTubeChannelResponse.model_validate(channel) for channel in channels]
 
 
 @router.delete("/youtube/channels/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -364,4 +471,3 @@ def disconnect_channel(
         details={"channel_id": channel_id},
     )
     db.commit()
-

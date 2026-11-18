@@ -44,6 +44,8 @@ class JobResponse(BaseModel):
     rights_evidence_json: dict[str, Any] = Field(default_factory=dict)
     rejection_reason: str | None = None
     settings_json: dict[str, Any] = Field(default_factory=dict)
+    source_mode: Literal["url", "uploaded_file"] = "url"
+    uploaded_filename: str | None = None
     status: str
     error_message: str | None = None
     created_at: datetime

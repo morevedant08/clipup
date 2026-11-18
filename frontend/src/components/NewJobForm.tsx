@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { createJob } from "@/lib/api";
 import type { Campaign, JobItem } from "@/lib/types";
 import { RightsBasisBadge, StatusBadge } from "./Badges";
@@ -10,16 +10,32 @@ interface NewJobFormProps {
   onJobCreated: (job: JobItem) => void;
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
   const [sourceUrl, setSourceUrl] = useState("");
   const [campaignId, setCampaignId] = useState<string>("");
   const [clipCount, setClipCount] = useState<number>(3);
   const [clipDuration, setClipDuration] = useState<number>(30);
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastOutcome, setLastOutcome] = useState<JobItem | null>(null);
 
   const selectedCampaign = campaigns.find((c) => c.id === campaignId) || null;
+
+  function clearSelectedFile() {
+    setSourceFile(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -36,11 +52,13 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
           clip_duration_sec: clipDuration,
           aspect_ratio: "9:16",
         },
+        source_file: sourceFile,
       });
       setLastOutcome(job);
       onJobCreated(job);
       if (job.status !== "rejected") {
         setSourceUrl("");
+        clearSelectedFile();
       }
     } catch (err) {
       setError(
@@ -57,7 +75,7 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
         <div>
           <h2 className="text-base font-semibold text-white">New Clipping Job</h2>
           <p className="text-xs text-slate-400">
-            Paste a YouTube video URL. Clipper runs the Rights Gate before any download starts.
+            Paste a YouTube video URL. Clipper runs the Rights Gate on the URL first before downloading or accepting an uploaded file.
           </p>
         </div>
       </div>
@@ -104,6 +122,44 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
               ))}
             </select>
           </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label
+              htmlFor="source-file"
+              className="text-xs font-medium text-slate-300"
+            >
+              Upload source file instead of downloading{" "}
+              <span className="font-normal text-slate-500">(optional, MP4 / MOV / WebM)</span>
+            </label>
+            {sourceFile && (
+              <button
+                type="button"
+                onClick={clearSelectedFile}
+                className="text-xs text-slate-400 hover:text-white"
+              >
+                Clear file
+              </button>
+            )}
+          </div>
+          <input
+            ref={fileInputRef}
+            id="source-file"
+            type="file"
+            accept=".mp4,.mov,.webm,video/mp4,video/quicktime,video/webm"
+            onChange={(e) => setSourceFile(e.target.files?.[0] || null)}
+            className="mt-2 block w-full text-xs text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-800 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-slate-700"
+          />
+          {sourceFile ? (
+            <p className="mt-1.5 text-[11px] text-indigo-300">
+              Selected: {sourceFile.name} ({formatFileSize(sourceFile.size)}) — will skip YouTube download after the Rights Gate approves the URL.
+            </p>
+          ) : (
+            <p className="mt-1.5 text-[11px] text-slate-500">
+              Leave blank to download automatically from YouTube. Use this if you already have the source video file or if YouTube blocks automated downloads.
+            </p>
+          )}
         </div>
 
         {selectedCampaign && (
@@ -172,7 +228,13 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
             disabled={submitting}
             className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
           >
-            {submitting ? "Checking Rights..." : "Verify Rights & Queue Job"}
+            {submitting
+              ? sourceFile
+                ? "Verifying Rights & Uploading..."
+                : "Checking Rights..."
+              : sourceFile
+                ? "Verify Rights & Upload Source"
+                : "Verify Rights & Queue Job"}
           </button>
         </div>
       </form>
@@ -209,7 +271,9 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
         <div className="mt-4 rounded-xl border border-emerald-800/70 bg-emerald-950/50 p-4">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-semibold text-emerald-100">
-              Rights Verified — Job Queued
+              {lastOutcome.source_mode === "uploaded_file"
+                ? "Rights Verified — Uploaded Source Queued"
+                : "Rights Verified — Job Queued"}
             </span>
             <StatusBadge status={lastOutcome.status} />
             <RightsBasisBadge basis={lastOutcome.rights_basis} />
@@ -226,4 +290,3 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
     </section>
   );
 }
-

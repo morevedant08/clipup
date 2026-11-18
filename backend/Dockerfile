@@ -6,7 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Deno JS runtime required by yt-dlp for YouTube extraction
+COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+RUN deno --version
 
 WORKDIR /app
 
@@ -18,4 +23,3 @@ COPY . /app
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

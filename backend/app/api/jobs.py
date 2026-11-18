@@ -1,13 +1,17 @@
-"""Job submission (with mandatory Rights Gate), listing, detail, and clip review endpoints."""
+"""Job submission (with mandatory Rights Gate & optional source file upload), listing, detail, and clip review."""
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, selectinload
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.api.deps import (
     JobDispatcher,
@@ -27,6 +31,10 @@ from app.schemas.job import JobCreateRequest, JobResponse
 from app.security import TokenCipher
 from app.services.audit import record_audit
 from app.services.rights import check_rights_for_user
+from app.services.uploads import (
+    VideoUploadValidationError,
+    save_validated_source_upload,
+)
 from app.services.youtube import (
     YouTubeAPIError,
     YouTubeService,
@@ -38,9 +46,26 @@ from app.services.youtube import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
+_INTERNAL_SETTINGS_KEYS = frozenset({"uploaded_source_path"})
+
 
 def _serialize_job(job: Job) -> JobResponse:
-    """Serialize Job ORM object and attach clip preview URLs."""
+    """Serialize Job ORM object, attach clip preview URLs, and hide internal paths."""
+    raw_settings = dict(job.settings_json or {})
+    source_mode = (
+        "uploaded_file"
+        if raw_settings.get("source_mode") == "uploaded_file"
+        else "url"
+    )
+    uploaded_filename = (
+        str(raw_settings["uploaded_source_filename"])
+        if raw_settings.get("uploaded_source_filename")
+        else None
+    )
+    public_settings = {
+        k: v for k, v in raw_settings.items() if k not in _INTERNAL_SETTINGS_KEYS
+    }
+
     clips = [
         ClipResponse(
             id=clip.id,
@@ -69,7 +94,9 @@ def _serialize_job(job: Job) -> JobResponse:
         rights_basis=job.rights_basis,
         rights_evidence_json=job.rights_evidence_json,
         rejection_reason=job.rejection_reason,
-        settings_json=job.settings_json,
+        settings_json=public_settings,
+        source_mode=source_mode,
+        uploaded_filename=uploaded_filename,
         status=job.status,
         error_message=job.error_message,
         created_at=job.created_at,
@@ -98,19 +125,109 @@ def _try_get_user_access_token(
         return None
 
 
+async def _parse_job_create_request(
+    request: Request,
+) -> tuple[JobCreateRequest, StarletteUploadFile | None]:
+    """Parse POST /api/jobs from either application/json or multipart/form-data."""
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        raw_source_url = form.get("source_url")
+        if not isinstance(raw_source_url, str) or not raw_source_url.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="source_url is required.",
+            )
+
+        raw_campaign_id = form.get("campaign_id")
+        campaign_id = (
+            raw_campaign_id.strip()
+            if isinstance(raw_campaign_id, str) and raw_campaign_id.strip()
+            else None
+        )
+
+        settings_data: dict[str, Any] = {}
+        raw_settings = form.get("settings")
+        if isinstance(raw_settings, str) and raw_settings.strip():
+            try:
+                parsed_settings = json.loads(raw_settings)
+                if not isinstance(parsed_settings, dict):
+                    raise ValueError("settings must be a JSON object")
+                settings_data.update(parsed_settings)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Invalid JSON in 'settings' field.",
+                ) from exc
+
+        for field_name in ("clip_count", "clip_duration_sec", "aspect_ratio"):
+            raw_val = form.get(field_name)
+            if isinstance(raw_val, str) and raw_val.strip():
+                settings_data[field_name] = raw_val.strip()
+
+        raw_file = form.get("source_file") or form.get("file")
+        upload_file: StarletteUploadFile | None = None
+        if isinstance(raw_file, StarletteUploadFile) and raw_file.filename:
+            upload_file = raw_file
+
+        try:
+            payload = JobCreateRequest.model_validate(
+                {
+                    "source_url": raw_source_url,
+                    "campaign_id": campaign_id,
+                    "settings": settings_data,
+                }
+            )
+        except ValidationError as exc:
+            if upload_file is not None:
+                await upload_file.close()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=exc.errors(),
+            ) from exc
+
+        return payload, upload_file
+
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request body must be valid JSON or multipart/form-data.",
+        ) from exc
+
+    try:
+        payload = JobCreateRequest.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.errors(),
+        ) from exc
+    return payload, None
+
+
 @router.post("", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
-def create_job(
-    payload: JobCreateRequest,
+async def create_job(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     youtube_service: YouTubeService = Depends(get_youtube_service),
     job_dispatcher: JobDispatcher = Depends(get_job_dispatcher),
 ) -> JobResponse:
-    """Validate YouTube URL, fetch metadata, enforce Rights Gate, and reject or queue the job."""
+    """Validate YouTube URL, fetch metadata, enforce Rights Gate, accept optional upload, and queue.
+
+    Accepts either JSON (`JobCreateRequest`) or `multipart/form-data` with an optional
+    `source_file` (mp4/mov/webm). The Rights Gate ALWAYS runs first on the YouTube URL;
+    uploaded files are discarded and never stored if the rights check fails.
+    """
+    payload, source_file = await _parse_job_create_request(request)
+
     try:
         video_id = extract_youtube_video_id(payload.source_url)
         canonical_url = normalize_youtube_video_url(video_id)
     except YouTubeURLValidationError as exc:
+        if source_file is not None:
+            await source_file.close()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
@@ -121,6 +238,8 @@ def create_job(
             db.query(Campaign.id).filter(Campaign.id == payload.campaign_id).first()
         )
         if campaign_exists is None:
+            if source_file is not None:
+                await source_file.close()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Selected campaign was not found.",
@@ -133,6 +252,8 @@ def create_job(
             access_token=access_token,
         )
     except YouTubeAPIError as exc:
+        if source_file is not None:
+            await source_file.close()
         logger.warning("Metadata lookup failed for video %s: %s", video_id, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -140,6 +261,10 @@ def create_job(
         ) from exc
 
     # Start in pending_rights state before recording the Rights Gate decision
+    base_settings: dict[str, Any] = {
+        **payload.settings.model_dump(),
+        "source_mode": "url",
+    }
     job = Job(
         user_id=current_user.id,
         source_url=canonical_url,
@@ -148,13 +273,14 @@ def create_job(
         source_title=video_meta.title,
         source_duration_sec=video_meta.duration_sec,
         campaign_id=payload.campaign_id,
-        settings_json=payload.settings.model_dump(),
+        settings_json=base_settings,
         status=JobStatus.PENDING_RIGHTS.value,
         rights_evidence_json={},
     )
     db.add(job)
     db.flush()
 
+    # NON-NEGOTIABLE: Run Rights Gate FIRST on the URL before accepting any uploaded file
     decision = check_rights_for_user(
         db,
         user=current_user,
@@ -166,6 +292,10 @@ def create_job(
     job.rights_evidence_json = decision.evidence
 
     if not decision.allowed:
+        had_upload = source_file is not None
+        if source_file is not None:
+            await source_file.close()
+
         job.status = JobStatus.REJECTED.value
         job.rejection_reason = decision.reason
         record_audit(
@@ -177,13 +307,55 @@ def create_job(
                 "video_id": video_id,
                 "channel_id": video_meta.channel_id,
                 "reason": decision.reason,
+                "source_upload_discarded": had_upload,
             },
         )
         db.commit()
         db.refresh(job)
         return _serialize_job(job)
 
-    # Rights passed -> transition to queued and enqueue background worker
+    # Rights passed -> if a source file was uploaded, validate & store under STORAGE_ROOT
+    source_mode = "url"
+    if source_file is not None:
+        settings = get_settings()
+        try:
+            uploaded = await save_validated_source_upload(
+                source_file,
+                job_id=job.id,
+                storage_root=settings.storage_path,
+                max_size_bytes=settings.max_upload_size_bytes,
+            )
+        except VideoUploadValidationError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.message,
+            ) from exc
+
+        source_mode = "uploaded_file"
+        job.settings_json = {
+            **base_settings,
+            "source_mode": "uploaded_file",
+            "uploaded_source_path": uploaded.relative_path,
+            "uploaded_source_filename": uploaded.original_filename,
+            "uploaded_source_sha256": uploaded.sha256,
+            "uploaded_source_size_bytes": uploaded.size_bytes,
+        }
+        record_audit(
+            db,
+            "job.source_uploaded",
+            user_id=current_user.id,
+            job_id=job.id,
+            details={
+                "source_mode": "uploaded_file",
+                "original_filename": uploaded.original_filename,
+                "extension": uploaded.extension,
+                "size_bytes": uploaded.size_bytes,
+                "sha256": uploaded.sha256,
+            },
+        )
+
+    # Transition to queued and enqueue background worker
     job.status = JobStatus.QUEUED.value
     job.rejection_reason = None
     record_audit(
@@ -196,6 +368,7 @@ def create_job(
             "channel_id": video_meta.channel_id,
             "rights_basis": job.rights_basis,
             "requires_attribution": decision.requires_attribution,
+            "source_mode": source_mode,
         },
     )
     db.commit()
@@ -207,7 +380,11 @@ def create_job(
             "job.queued",
             user_id=current_user.id,
             job_id=job.id,
-            details={"task_id": task_id, "rights_basis": job.rights_basis},
+            details={
+                "task_id": task_id,
+                "rights_basis": job.rights_basis,
+                "source_mode": source_mode,
+            },
         )
         db.commit()
     except Exception as exc:  # noqa: BLE001
@@ -348,11 +525,10 @@ def stream_clip_media(
 
     storage_root = get_settings().storage_path
     resolved = (storage_root / clip.file_path).resolve()
-    if not str(resolved).startswith(str(storage_root)) or not resolved.is_file():
+    if not resolved.is_relative_to(storage_root) or not resolved.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Clip media file not found on disk.",
         )
 
     return FileResponse(path=resolved, media_type="video/mp4")
-

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -59,6 +60,19 @@ class YouTubeURLValidationError(ValueError):
 
 class YouTubeAPIError(RuntimeError):
     """Raised when a Google OAuth or YouTube Data API request fails."""
+
+
+class VideoDownloadError(YouTubeAPIError):
+    """Raised when yt-dlp fails to download a rights-verified video.
+
+    Separates a short, UI-safe `user_message` from full technical diagnostics
+    (`detail`) intended only for server/worker logs.
+    """
+
+    def __init__(self, user_message: str, detail: str | None = None) -> None:
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.detail = detail or user_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +194,7 @@ class YouTubeService:
         assert FORBIDDEN_UPLOAD_SCOPES.isdisjoint(scopes), "Upload scopes are prohibited in Phase 1"
         params = {
             "client_id": self.settings.google_client_id,
-            "redirect_uri": self.settings.youtube_connect_redirect_uri,
+            "redirect_uri": self.settings.google_oauth_redirect_uri,
             "response_type": "code",
             "scope": " ".join(scopes),
             "access_type": "offline",
@@ -354,6 +368,47 @@ class YouTubeService:
         )
 
 
+def _summarize_yt_dlp_error(stderr: str) -> str:
+    """Convert raw yt-dlp stderr into a short, clear message suitable for the UI."""
+    lowered = (stderr or "").lower()
+    if "no supported javascript runtime" in lowered or "javascript runtime" in lowered:
+        return (
+            "Video download failed because the worker's JavaScript runtime (Deno) "
+            "is unavailable. Rebuild the worker image and retry."
+        )
+    if "private video" in lowered:
+        return "This YouTube video is private and cannot be downloaded."
+    if "sign in to confirm" in lowered or "not a bot" in lowered or "age-restricted" in lowered:
+        return "YouTube blocked automated download with a sign-in or bot check."
+    if "video unavailable" in lowered or "this video is not available" in lowered:
+        return "YouTube reported this video as unavailable for download."
+    if "http error 429" in lowered or "too many requests" in lowered or "rate-limit" in lowered or "rate limit" in lowered:
+        return "YouTube rate-limited the download. Please try again later."
+    return "Failed to download the source video from YouTube."
+
+
+def _build_yt_dlp_command(source_url: str, output_template: str) -> list[str]:
+    """Construct the yt-dlp subprocess command with Deno JS runtime explicitly enabled."""
+    deno_path = shutil.which("deno")
+    js_runtime_arg = f"deno:{deno_path}" if deno_path else "deno"
+    return [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--no-playlist",
+        "--no-progress",
+        "--js-runtimes",
+        js_runtime_arg,
+        "-f",
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        output_template,
+        source_url,
+    ]
+
+
 def download_rights_verified_video(job: Job, output_dir: Path) -> Path:
     """Download a YouTube video via yt-dlp ONLY after enforcing the Rights Gate.
 
@@ -366,19 +421,7 @@ def download_rights_verified_video(job: Job, output_dir: Path) -> Path:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(output_dir / f"{job.youtube_video_id}.%(ext)s")
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
-        "--no-playlist",
-        "-f",
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format",
-        "mp4",
-        "-o",
-        output_template,
-        job.source_url,
-    ]
+    cmd = _build_yt_dlp_command(job.source_url, output_template)
     logger.info("Downloading rights-verified video %s for job %s", job.youtube_video_id, job.id)
     try:
         subprocess.run(
@@ -388,13 +431,42 @@ def download_rights_verified_video(job: Job, output_dir: Path) -> Path:
             text=True,
             timeout=900,
         )
-    except (subprocess.SubprocessError, FileNotFoundError) as exc:
-        stderr_hint = (
-            exc.stderr[-400:]
-            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr
-            else str(exc)
+    except subprocess.TimeoutExpired as exc:
+        logger.error(
+            "yt-dlp timed out downloading video %s for job %s",
+            job.youtube_video_id,
+            job.id,
         )
-        raise YouTubeAPIError(f"yt-dlp download failed: {stderr_hint}") from exc
+        raise VideoDownloadError(
+            "Video download timed out before completing.",
+            detail=f"yt-dlp timed out after {exc.timeout}s for video {job.youtube_video_id}",
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        full_stderr = (exc.stderr or "").strip()
+        full_stdout = (exc.stdout or "").strip()
+        logger.error(
+            "yt-dlp failed for job %s (video=%s, exit_code=%s)\nstderr:\n%s\nstdout:\n%s",
+            job.id,
+            job.youtube_video_id,
+            exc.returncode,
+            full_stderr,
+            full_stdout,
+        )
+        raise VideoDownloadError(
+            _summarize_yt_dlp_error(full_stderr),
+            detail=full_stderr or f"yt-dlp exited with code {exc.returncode}",
+        ) from exc
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        logger.error(
+            "yt-dlp invocation error for job %s (video=%s): %s",
+            job.id,
+            job.youtube_video_id,
+            exc,
+        )
+        raise VideoDownloadError(
+            "Failed to start video downloader on worker.",
+            detail=str(exc),
+        ) from exc
 
     expected_mp4 = output_dir / f"{job.youtube_video_id}.mp4"
     if expected_mp4.is_file():
@@ -402,5 +474,8 @@ def download_rights_verified_video(job: Job, output_dir: Path) -> Path:
 
     candidates = sorted(output_dir.glob(f"{job.youtube_video_id}.*"))
     if not candidates:
-        raise YouTubeAPIError("yt-dlp completed but no video file was produced.")
+        raise VideoDownloadError(
+            "Download completed but no video file was produced.",
+            detail=f"No files matched {job.youtube_video_id}.* in {output_dir}",
+        )
     return candidates[0]

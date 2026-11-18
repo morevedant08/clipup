@@ -48,19 +48,22 @@ class Settings(BaseSettings):
     google_client_id: str = Field(default="")
     google_client_secret: str = Field(default="")
     google_oauth_redirect_uri: str = Field(
-        default="http://localhost:8000/api/auth/google/callback"
-    )
-    youtube_connect_redirect_uri: str = Field(
-        default="http://localhost:8000/api/auth/youtube/callback"
+        default="http://localhost:8000/auth/google/callback"
     )
     youtube_api_key: str = Field(default="")
 
     # Media storage & clipping
     storage_root: str = Field(default="./storage")
+    max_upload_size_mb: int = Field(default=500, ge=1)
     clip_engine: str = Field(default="stub")
     max_video_duration_sec: int = Field(default=7200)
     default_clip_count: int = Field(default=3)
     default_clip_duration_sec: int = Field(default=30)
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        """Return configured upload size cap in bytes."""
+        return self.max_upload_size_mb * 1024 * 1024
 
     @property
     def cors_origins(self) -> list[str]:

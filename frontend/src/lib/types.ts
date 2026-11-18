@@ -10,6 +10,8 @@ export type RightsBasis = "owner" | "campaign" | "cc" | "permission";
 
 export type ReviewStatus = "pending" | "approved" | "rejected";
 
+export type SourceMode = "url" | "uploaded_file";
+
 export interface YouTubeChannel {
   id: string;
   channel_id: string;
@@ -93,6 +95,8 @@ export interface JobItem {
   rights_evidence_json: Record<string, unknown>;
   rejection_reason: string | null;
   settings_json: Record<string, unknown>;
+  source_mode?: SourceMode;
+  uploaded_filename?: string | null;
   status: JobStatus;
   error_message: string | null;
   created_at: string;
