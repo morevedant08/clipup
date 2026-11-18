@@ -95,3 +95,4 @@ class Job(TimestampMixin, Base):
         order_by="Clip.start_sec",
     )
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="job")
+

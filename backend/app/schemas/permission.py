@@ -23,3 +23,4 @@ class PermissionResponse(BaseModel):
     expires_at: datetime | None = None
     revoked: bool
     created_at: datetime
+

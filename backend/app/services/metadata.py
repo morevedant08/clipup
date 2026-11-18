@@ -48,3 +48,4 @@ def build_clip_metadata(
         "attribution_text": attribution_text,
         "campaign_rules": campaign_rules or None,
     }
+

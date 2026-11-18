@@ -103,3 +103,4 @@ def test_youtube_callback_rejects_upload_scope(
 def test_dev_login_disabled_by_default(client: TestClient) -> None:
     resp = client.post("/api/auth/dev-login", json={"email": "dev@example.com"})
     assert resp.status_code == 404
+

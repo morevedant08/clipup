@@ -34,3 +34,4 @@ class LocalEngine(ClipEngine):
             "LocalEngine (Whisper + LLM) is a documented TODO. "
             "Set CLIP_ENGINE=stub to use StubEngine."
         )
+

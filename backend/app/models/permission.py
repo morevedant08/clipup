@@ -46,3 +46,4 @@ class Permission(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="permissions")
+

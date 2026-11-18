@@ -364,3 +364,4 @@ def disconnect_channel(
         details={"channel_id": channel_id},
     )
     db.commit()
+

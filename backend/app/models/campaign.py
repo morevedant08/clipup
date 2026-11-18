@@ -78,3 +78,4 @@ class CampaignSource(Base):
     )
 
     campaign: Mapped[Campaign] = relationship(back_populates="sources")
+

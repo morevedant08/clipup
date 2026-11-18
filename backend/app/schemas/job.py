@@ -49,3 +49,4 @@ class JobResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     clips: list[ClipResponse] = Field(default_factory=list)
+

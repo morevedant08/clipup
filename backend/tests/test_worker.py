@@ -196,3 +196,4 @@ def test_worker_end_to_end_with_stub_engine_and_media_stream(
     assert media_resp.status_code == 200
     assert media_resp.headers["content-type"] == "video/mp4"
     assert len(media_resp.content) > 1000
+

@@ -69,3 +69,4 @@ class CampaignResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     sources: list[CampaignSourceResponse] = Field(default_factory=list)
+

@@ -68,3 +68,4 @@ def get_clip_engine(engine_name: str | None = None) -> ClipEngine:
     raise ValueError(
         f"Unsupported clip engine '{selected}'. Supported engines: stub, local."
     )
+

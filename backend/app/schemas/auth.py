@@ -54,3 +54,4 @@ class DevLoginRequest(BaseModel):
 
     email: EmailStr
     name: str | None = "Dev Creator"
+

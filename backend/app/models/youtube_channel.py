@@ -57,3 +57,4 @@ class YouTubeChannel(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="youtube_channels")
+

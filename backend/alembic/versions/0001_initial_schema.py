@@ -222,3 +222,4 @@ def downgrade() -> None:
     op.drop_table("campaigns")
     op.drop_table("youtube_channels")
     op.drop_table("users")
+

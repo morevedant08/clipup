@@ -143,3 +143,4 @@ def revoke_permission(
     db.commit()
     db.refresh(record)
     return PermissionResponse.model_validate(record)
+

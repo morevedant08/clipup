@@ -58,3 +58,4 @@ class Clip(Base):
     )
 
     job: Mapped[Job] = relationship(back_populates="clips")
+

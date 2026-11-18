@@ -51,3 +51,4 @@ class AuditLog(Base):
     )
 
     job: Mapped[Job | None] = relationship(back_populates="audit_logs")
+

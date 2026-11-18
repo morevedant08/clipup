@@ -137,3 +137,4 @@ def test_permission_document_upload_and_revoke(
     )
     assert revoke_resp.status_code == 200
     assert revoke_resp.json()["revoked"] is True
+

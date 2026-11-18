@@ -31,3 +31,4 @@ class ClipReviewUpdate(BaseModel):
     """Payload to update a clip's human review decision."""
 
     review_status: Literal["pending", "approved", "rejected"]
+

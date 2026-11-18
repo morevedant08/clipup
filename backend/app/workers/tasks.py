@@ -213,3 +213,4 @@ def process_clipping_job(self, job_id: str) -> dict[str, Any]:
         }
     finally:
         db.close()
+

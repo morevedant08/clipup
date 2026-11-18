@@ -134,3 +134,4 @@ def verify_oauth_state(
     if payload.get("purpose") != expected_purpose:
         raise jwt.InvalidTokenError("OAuth state purpose mismatch.")
     return payload
+

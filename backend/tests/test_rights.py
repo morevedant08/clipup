@@ -350,3 +350,4 @@ def test_assert_job_rights_approved_blocks_unapproved_jobs() -> None:
         status=JobStatus.QUEUED.value,
     )
     assert_job_rights_approved(valid_job)
+

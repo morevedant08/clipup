@@ -125,3 +125,4 @@ def test_alembic_upgrade_downgrade_and_orm_roundtrip(
         assert len(reloaded_job.clips) == 1
         assert reloaded_job.campaign is not None
         assert reloaded_job.campaign.name == "Launch Campaign"
+

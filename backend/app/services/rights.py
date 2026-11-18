@@ -447,3 +447,4 @@ def reverify_job_rights(
         campaign_id=job.campaign_id,
         now=now,
     )
+
