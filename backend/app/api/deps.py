@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
 
 JobDispatcher = Callable[[uuid.UUID], str | None]
+UploadDispatcher = Callable[[uuid.UUID], str | None]
 
 
 def get_youtube_service() -> YouTubeService:
@@ -43,6 +44,19 @@ def _default_dispatch_job(job_id: uuid.UUID) -> str | None:
 def get_job_dispatcher() -> JobDispatcher:
     """Provide the background job dispatcher (overridable in tests)."""
     return _default_dispatch_job
+
+
+def _default_dispatch_upload(upload_id: uuid.UUID) -> str | None:
+    """Enqueue a YouTube Shorts upload onto Celery."""
+    from app.workers.tasks import upload_clip_to_youtube
+
+    async_result = upload_clip_to_youtube.delay(str(upload_id))
+    return str(async_result.id)
+
+
+def get_upload_dispatcher() -> UploadDispatcher:
+    """Provide the background upload dispatcher (overridable in tests)."""
+    return _default_dispatch_upload
 
 
 def _resolve_user_from_token(token: str, db: Session) -> User:

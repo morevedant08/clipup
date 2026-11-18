@@ -47,6 +47,7 @@ def test_alembic_upgrade_downgrade_and_orm_roundtrip(
         "permissions",
         "jobs",
         "clips",
+        "uploads",
         "audit_log",
         "alembic_version",
     }

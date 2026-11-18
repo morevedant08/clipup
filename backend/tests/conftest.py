@@ -12,7 +12,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.deps import get_job_dispatcher, get_youtube_service
+from app.api.deps import (
+    get_job_dispatcher,
+    get_upload_dispatcher,
+    get_youtube_service,
+)
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.main import create_app
@@ -46,6 +50,38 @@ class FakeYouTubeService(YouTubeService):
             }
         ]
         self.videos_by_id: dict[str, VideoMetadata] = {}
+        self.refresh_error: Exception | None = None
+        self.upload_error: Exception | None = None
+        self.uploaded_calls: list[dict[str, Any]] = []
+        self.next_uploaded_video_id: str = "SHORT_ID_001"
+
+    def refresh_access_token(self, refresh_token: str) -> str:
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        return "fresh-fake-access-token"
+
+    def upload_video_resumable(
+        self,
+        file_path: Path,
+        *,
+        access_token: str,
+        title: str,
+        description: str,
+        tags: list[str],
+        privacy: str = "private",
+    ) -> str:
+        if self.upload_error is not None:
+            raise self.upload_error
+        self.uploaded_calls.append(
+            {
+                "file_path": str(file_path),
+                "title": title,
+                "description": description,
+                "tags": list(tags),
+                "privacy": privacy,
+            }
+        )
+        return self.next_uploaded_video_id
 
     def exchange_code_for_tokens(self, code: str, redirect_uri: str) -> dict[str, Any]:
         return dict(self.tokens_response)
@@ -128,10 +164,16 @@ def dispatched_jobs() -> list[str]:
 
 
 @pytest.fixture()
+def dispatched_uploads() -> list[str]:
+    return []
+
+
+@pytest.fixture()
 def client(
     db_session: Session,
     fake_youtube: FakeYouTubeService,
     dispatched_jobs: list[str],
+    dispatched_uploads: list[str],
     test_settings: Settings,
 ) -> Generator[TestClient, None, None]:
     app = create_app()
@@ -143,9 +185,14 @@ def client(
         dispatched_jobs.append(str(job_id))
         return f"fake-task-{job_id}"
 
+    def _fake_upload_dispatcher(upload_id) -> str:
+        dispatched_uploads.append(str(upload_id))
+        return f"fake-upload-task-{upload_id}"
+
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_youtube_service] = lambda: fake_youtube
     app.dependency_overrides[get_job_dispatcher] = lambda: _fake_dispatcher
+    app.dependency_overrides[get_upload_dispatcher] = lambda: _fake_upload_dispatcher
 
     with TestClient(app) as test_client:
         yield test_client

@@ -25,17 +25,20 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
+YOUTUBE_UPLOAD_API_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 
 LOGIN_SCOPES: tuple[str, ...] = ("openid", "email", "profile")
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
-# Explicitly forbidden in Phase 1 (no upload scope yet).
+YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+# Explicitly forbidden on the read-only connect flow (only granted via explicit "Enable uploading").
 FORBIDDEN_UPLOAD_SCOPES: frozenset[str] = frozenset(
     {
-        "https://www.googleapis.com/auth/youtube.upload",
+        YOUTUBE_UPLOAD_SCOPE,
         "https://www.googleapis.com/auth/youtube",
         "https://www.googleapis.com/auth/youtube.force-ssl",
     }
 )
+_RESUMABLE_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB (must be a multiple of 256 KiB)
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
@@ -60,6 +63,18 @@ class YouTubeURLValidationError(ValueError):
 
 class YouTubeAPIError(RuntimeError):
     """Raised when a Google OAuth or YouTube Data API request fails."""
+
+
+class YouTubeAuthRevokedError(YouTubeAPIError):
+    """Raised when a user's OAuth refresh token is expired, revoked, or lacks upload scope."""
+
+
+class YouTubeQuotaExceededError(YouTubeAPIError):
+    """Raised when YouTube Data API v3 rejects an upload due to daily quota limits."""
+
+
+class YouTubeTransientUploadError(YouTubeAPIError):
+    """Raised on transient network or 5xx/429 YouTube upload errors eligible for Celery retry."""
 
 
 class VideoDownloadError(YouTubeAPIError):
@@ -191,7 +206,9 @@ class YouTubeService:
         """Build the Google OAuth URL requesting ONLY read-only YouTube access."""
         self._require_oauth_config()
         scopes = (YOUTUBE_READONLY_SCOPE,)
-        assert FORBIDDEN_UPLOAD_SCOPES.isdisjoint(scopes), "Upload scopes are prohibited in Phase 1"
+        assert FORBIDDEN_UPLOAD_SCOPES.isdisjoint(scopes), (
+            "Upload scopes are prohibited on the read-only connect flow"
+        )
         params = {
             "client_id": self.settings.google_client_id,
             "redirect_uri": self.settings.google_oauth_redirect_uri,
@@ -199,6 +216,22 @@ class YouTubeService:
             "scope": " ".join(scopes),
             "access_type": "offline",
             "include_granted_scopes": "false",
+            "prompt": "consent",
+            "state": state,
+        }
+        return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+
+    def build_youtube_upload_connect_url(self, state: str) -> str:
+        """Build the explicit opt-in Google OAuth URL requesting youtube.upload + youtube.readonly."""
+        self._require_oauth_config()
+        scopes = (YOUTUBE_READONLY_SCOPE, YOUTUBE_UPLOAD_SCOPE)
+        params = {
+            "client_id": self.settings.google_client_id,
+            "redirect_uri": self.settings.google_oauth_redirect_uri,
+            "response_type": "code",
+            "scope": " ".join(scopes),
+            "access_type": "offline",
+            "include_granted_scopes": "true",
             "prompt": "consent",
             "state": state,
         }
@@ -227,7 +260,10 @@ class YouTubeService:
         return resp.json()
 
     def refresh_access_token(self, refresh_token: str) -> str:
-        """Exchange a decrypted refresh token for a fresh short-lived access token."""
+        """Exchange a decrypted refresh token for a fresh short-lived access token.
+
+        Raises YouTubeAuthRevokedError when Google reports invalid_grant / revoked access.
+        """
         self._require_oauth_config()
         payload = {
             "refresh_token": refresh_token,
@@ -240,11 +276,30 @@ class YouTubeService:
                 resp = client.post(GOOGLE_TOKEN_URL, data=payload)
         except httpx.HTTPError as exc:
             logger.error("Google token refresh network error: %s", type(exc).__name__)
-            raise YouTubeAPIError("Unable to refresh Google OAuth token.") from exc
+            raise YouTubeTransientUploadError(
+                "Unable to reach Google OAuth token endpoint."
+            ) from exc
 
         if resp.status_code != 200:
-            logger.warning("Google token refresh failed with status %s", resp.status_code)
-            raise YouTubeAPIError("Google OAuth token refresh failed.")
+            err_code = ""
+            try:
+                err_code = str(resp.json().get("error", "")).lower()
+            except ValueError:
+                err_code = ""
+            logger.warning(
+                "Google token refresh failed with status %s (error=%s)",
+                resp.status_code,
+                err_code or "unknown",
+            )
+            if err_code in {"invalid_grant", "unauthorized_client", "access_denied"} or resp.status_code in {400, 401}:
+                raise YouTubeAuthRevokedError(
+                    "Your YouTube authorization has expired or was revoked. "
+                    "Click 'Enable uploading' to reconnect your channel."
+                )
+            raise YouTubeTransientUploadError(
+                "Temporary Google OAuth error while refreshing access token."
+            )
+
         access_token = resp.json().get("access_token")
         if not access_token:
             raise YouTubeAPIError("Google token refresh returned no access token.")
@@ -366,6 +421,156 @@ class YouTubeService:
             published_at=snippet.get("publishedAt"),
             thumbnail_url=thumb_url,
         )
+
+    @staticmethod
+    def _classify_upload_http_error(resp: httpx.Response) -> YouTubeAPIError:
+        """Translate a YouTube Data API v3 upload HTTP error into a typed exception."""
+        reasons: set[str] = set()
+        api_message = ""
+        try:
+            err_obj = resp.json().get("error", {})
+            api_message = str(err_obj.get("message", ""))
+            for item in err_obj.get("errors", []):
+                if isinstance(item, dict) and item.get("reason"):
+                    reasons.add(str(item["reason"]).lower())
+        except ValueError:
+            pass
+
+        quota_reasons = {"quotaexceeded", "dailylimitexceeded", "uploadlimitexceeded"}
+        if resp.status_code == 403 and (
+            reasons & quota_reasons or "quota" in api_message.lower()
+        ):
+            return YouTubeQuotaExceededError(
+                "YouTube API daily upload quota exceeded. Please try again after the quota resets."
+            )
+
+        auth_reasons = {"autherror", "insufficientpermissions", "forbidden"}
+        if resp.status_code == 401 or (
+            resp.status_code == 403 and bool(reasons & auth_reasons)
+        ):
+            return YouTubeAuthRevokedError(
+                "YouTube upload permission was revoked or is missing. "
+                "Click 'Enable uploading' to reconnect your channel."
+            )
+
+        if resp.status_code in {429, 500, 502, 503, 504}:
+            return YouTubeTransientUploadError(
+                f"YouTube upload service temporarily unavailable (HTTP {resp.status_code})."
+            )
+
+        return YouTubeAPIError(
+            f"YouTube rejected the video upload (HTTP {resp.status_code}): "
+            f"{api_message[:180] or 'check worker logs for details.'}"
+        )
+
+    def upload_video_resumable(
+        self,
+        file_path: Path,
+        *,
+        access_token: str,
+        title: str,
+        description: str,
+        tags: list[str],
+        privacy: str = "private",
+    ) -> str:
+        """Upload a vertical Short MP4 via YouTube Data API v3 resumable upload protocol.
+
+        Returns the newly created YouTube video ID.
+        """
+        if not file_path.is_file():
+            raise YouTubeAPIError("Clip video file does not exist on disk.")
+
+        file_size = file_path.stat().st_size
+        if file_size <= 0:
+            raise YouTubeAPIError("Clip video file is empty.")
+
+        metadata_body: dict[str, Any] = {
+            "snippet": {
+                "title": title,
+                "description": description,
+                "tags": tags,
+                "categoryId": "22",
+            },
+            "status": {
+                "privacyStatus": privacy,
+                "selfDeclaredMadeForKids": False,
+            },
+        }
+
+        init_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Upload-Content-Length": str(file_size),
+            "X-Upload-Content-Type": "video/mp4",
+        }
+
+        try:
+            with httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
+                init_resp = client.post(
+                    YOUTUBE_UPLOAD_API_URL,
+                    params={"uploadType": "resumable", "part": "snippet,status"},
+                    headers=init_headers,
+                    json=metadata_body,
+                )
+                if init_resp.status_code not in {200, 201}:
+                    logger.warning(
+                        "YouTube resumable upload init failed with status %s",
+                        init_resp.status_code,
+                    )
+                    raise self._classify_upload_http_error(init_resp)
+
+                upload_uri = init_resp.headers.get("Location") or init_resp.headers.get("location")
+                if not upload_uri:
+                    raise YouTubeAPIError(
+                        "YouTube resumable upload did not return an upload session URI."
+                    )
+
+                with file_path.open("rb") as video_fp:
+                    offset = 0
+                    final_resp: httpx.Response | None = None
+                    while offset < file_size:
+                        chunk = video_fp.read(_RESUMABLE_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        end_byte = offset + len(chunk) - 1
+                        chunk_headers = {
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "video/mp4",
+                            "Content-Length": str(len(chunk)),
+                            "Content-Range": f"bytes {offset}-{end_byte}/{file_size}",
+                        }
+                        chunk_resp = client.put(
+                            upload_uri,
+                            headers=chunk_headers,
+                            content=chunk,
+                        )
+                        if chunk_resp.status_code == 308:
+                            offset = end_byte + 1
+                            continue
+                        if chunk_resp.status_code in {200, 201}:
+                            final_resp = chunk_resp
+                            break
+                        logger.warning(
+                            "YouTube resumable chunk upload failed with status %s",
+                            chunk_resp.status_code,
+                        )
+                        raise self._classify_upload_http_error(chunk_resp)
+
+                if final_resp is None:
+                    raise YouTubeTransientUploadError(
+                        "YouTube resumable upload ended without a completion response."
+                    )
+                video_id = final_resp.json().get("id")
+                if not video_id:
+                    raise YouTubeAPIError(
+                        "YouTube upload completed but returned no video ID."
+                    )
+                return str(video_id)
+        except httpx.HTTPError as exc:
+            logger.error("YouTube resumable upload network error: %s", type(exc).__name__)
+            raise YouTubeTransientUploadError(
+                "Network error while uploading clip to YouTube."
+            ) from exc
 
 
 def _summarize_yt_dlp_error(stderr: str) -> str:

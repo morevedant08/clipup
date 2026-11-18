@@ -42,6 +42,7 @@ from app.services.audit import record_audit
 from app.services.youtube import (
     FORBIDDEN_UPLOAD_SCOPES,
     YOUTUBE_READONLY_SCOPE,
+    YOUTUBE_UPLOAD_SCOPE,
     YouTubeAPIError,
     YouTubeService,
 )
@@ -112,6 +113,35 @@ def youtube_connect_url(
     )
     try:
         auth_url = youtube_service.build_youtube_connect_url(state)
+    except YouTubeAPIError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    _set_oauth_session_cookie(response, session_id)
+    return OAuthUrlResponse(auth_url=auth_url)
+
+
+@router.get("/youtube/enable-upload", response_model=OAuthUrlResponse)
+def youtube_enable_upload_url(
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    youtube_service: YouTubeService = Depends(get_youtube_service),
+) -> OAuthUrlResponse:
+    """Explicit opt-in OAuth flow requesting YouTube upload scope (youtube.upload).
+
+    Reuses the same signed, short-lived, session-bound state mechanism and the
+    single registered callback URI (/auth/google/callback).
+    """
+    session_id = generate_oauth_session_id()
+    state = create_oauth_state(
+        "youtube_upload_connect",
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    try:
+        auth_url = youtube_service.build_youtube_upload_connect_url(state)
     except YouTubeAPIError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -325,6 +355,136 @@ def _handle_youtube_connect_callback(
     )
 
 
+def _handle_youtube_upload_connect_callback(
+    *,
+    code: str,
+    user_id: uuid.UUID,
+    mode: str,
+    db: Session,
+    youtube_service: YouTubeService,
+) -> Response:
+    """Complete explicit 'Enable uploading' OAuth flow and store encrypted upload tokens."""
+    settings = get_settings()
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    try:
+        tokens = youtube_service.exchange_code_for_tokens(
+            code=code,
+            redirect_uri=settings.google_oauth_redirect_uri,
+        )
+    except YouTubeAPIError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    granted_scopes_raw = str(tokens.get("scope", ""))
+    granted_scopes = set(granted_scopes_raw.split())
+    if YOUTUBE_UPLOAD_SCOPE not in granted_scopes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "YouTube upload permission was not granted. "
+                "Please approve the YouTube upload scope to enable publishing."
+            ),
+        )
+
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google OAuth response did not include an access token.",
+        )
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Google OAuth did not return a refresh token. "
+                "Please click 'Enable uploading' again and grant consent."
+            ),
+        )
+
+    try:
+        owned_channels = youtube_service.fetch_owned_channels(str(access_token))
+    except YouTubeAPIError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    if not owned_channels:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No YouTube channel found on the authenticated Google account.",
+        )
+
+    cipher = TokenCipher.from_settings(settings)
+    encrypted_refresh = cipher.encrypt(str(refresh_token))
+
+    saved_channels: list[YouTubeChannel] = []
+    for ch in owned_channels:
+        existing = (
+            db.query(YouTubeChannel)
+            .filter(
+                YouTubeChannel.user_id == user.id,
+                YouTubeChannel.channel_id == ch["channel_id"],
+            )
+            .first()
+        )
+        if existing is None:
+            record = YouTubeChannel(
+                user_id=user.id,
+                channel_id=ch["channel_id"],
+                title=ch["title"],
+                handle=ch.get("handle"),
+                thumbnail_url=ch.get("thumbnail_url"),
+                encrypted_refresh_token=encrypted_refresh,
+                scopes=granted_scopes_raw,
+            )
+            db.add(record)
+            saved_channels.append(record)
+        else:
+            existing.title = ch["title"]
+            existing.handle = ch.get("handle")
+            existing.thumbnail_url = ch.get("thumbnail_url")
+            existing.encrypted_refresh_token = encrypted_refresh
+            existing.scopes = granted_scopes_raw
+            saved_channels.append(existing)
+
+    record_audit(
+        db,
+        "youtube.upload_enabled",
+        user_id=user.id,
+        details={
+            "channel_ids": [ch["channel_id"] for ch in owned_channels],
+            "scopes": granted_scopes_raw,
+        },
+    )
+    db.commit()
+    db.expire(user, ["youtube_channels"])
+    for rec in saved_channels:
+        db.refresh(rec)
+
+    if mode == "json":
+        payload = [
+            YouTubeChannelResponse.model_validate(rec).model_dump(mode="json")
+            for rec in saved_channels
+        ]
+        return JSONResponse(content=payload)
+
+    params = urlencode({"youtube_upload_enabled": "1", "channels": len(saved_channels)})
+    return RedirectResponse(
+        url=f"{settings.frontend_url.rstrip('/')}/?{params}",
+        status_code=status.HTTP_302_FOUND,
+    )
+
+
 @oauth_callback_router.get("/auth/google/callback")
 def google_oauth_callback(
     request: Request,
@@ -370,6 +530,21 @@ def google_oauth_callback(
                 detail="Invalid user identifier in OAuth state.",
             ) from exc
         resp = _handle_youtube_connect_callback(
+            code=code,
+            user_id=user_id,
+            mode=mode,
+            db=db,
+            youtube_service=youtube_service,
+        )
+    elif purpose == "youtube_upload_connect":
+        try:
+            user_id = uuid.UUID(str(state_payload["uid"]))
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid user identifier in OAuth state.",
+            ) from exc
+        resp = _handle_youtube_upload_connect_callback(
             code=code,
             user_id=user_id,
             mode=mode,

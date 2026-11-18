@@ -90,13 +90,16 @@ alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-### Celery Worker
+### Celery Worker & Beat Scheduler
 
 ```bash
 cd backend
 source .venv/bin/activate
 celery -A app.workers.celery_app:celery_app worker --loglevel=info
+celery -A app.workers.celery_app:celery_app beat --loglevel=info
 ```
+
+In Docker Compose, the `beat` service runs automatically alongside `worker` to dispatch scheduled YouTube Shorts uploads every 60 seconds.
 
 ### Backend Tests (pytest)
 
@@ -123,24 +126,36 @@ npm run typecheck
 npm run build
 ```
 
-## Google OAuth Setup (Read-Only Scope)
+## Google OAuth Setup (Read-Only + Opt-In Uploading)
 
-In Google Cloud Console:
+In Google Cloud Console (**APIs & Services**):
 1. Enable **YouTube Data API v3**.
-2. Create an OAuth 2.0 Web Application client.
-3. Add the exact Authorized Redirect URI:
+2. Create (or open) your OAuth 2.0 Web Application client and ensure this exact Authorized Redirect URI is registered:
    - `http://localhost:8000/auth/google/callback`
-4. Both Google sign-in (`google_login`) and read-only YouTube channel connection (`youtube_connect`) share `/auth/google/callback` using a signed, short-lived, `HttpOnly`-cookie session-bound `state` token.
-5. Phase 1 requests ONLY `openid`, `email`, `profile`, and `https://www.googleapis.com/auth/youtube.readonly`. Upload scopes (`youtube.upload`) are intentionally prohibited at this stage.
+3. Configure the **OAuth Consent Screen** (`Google Auth Platform -> Data Access / Scopes`):
+   - `openid`, `email`, `profile` (Google sign-in)
+   - `https://www.googleapis.com/auth/youtube.readonly` (read-only channel connect)
+   - `https://www.googleapis.com/auth/youtube.upload` (explicit opt-in **Enable uploading** flow)
+4. While the app is in **Testing** publishing status (`Google Auth Platform -> Audience`), add every Google account you want to test with under **Test users** (otherwise Google blocks OAuth with `Error 403: access_denied`).
+   - Note: Unverified OAuth apps in Testing mode have YouTube API uploads automatically restricted to `private` until Google app verification is completed.
+5. Sign-in (`google_login`), read-only channel connect (`youtube_connect`), and opt-in upload enablement (`youtube_upload_connect`) all share `/auth/google/callback` using a signed, short-lived, `HttpOnly`-cookie session-bound `state` token. Refresh tokens are stored Fernet-encrypted via `TOKEN_ENCRYPTION_KEY`.
+
+## Phase 3: Uploading Approved Clips to YouTube as Shorts
+
+- **Explicit approval required**: Only clips with `review_status == "approved"` can be uploaded (never auto-uploaded).
+- **Live pre-upload Rights Gate re-check**: Rights are re-verified immediately before queuing and again inside the Celery worker immediately before uploading (blocking expired campaigns, revoked permissions, disconnected channels, or changed YouTube licenses).
+- **Resumable upload & metadata**: Uses YouTube Data API v3 resumable uploads, defaults privacy to `private` (`private`, `unlisted`, or `public` selectable per upload), lets users edit title/description/tags before uploading, automatically adds `#Shorts`, attaches mandatory CC BY attribution for `cc` jobs, and appends required `#hashtags` from linked campaign rules.
+- **Scheduling & reliability**: Users can optionally set a future publish date/time (dispatched by Celery Beat), transient errors retry with exponential backoff, quota exhaustion surfaces a clear quota error, and revoked/expired OAuth tokens automatically revoke the channel's upload-enabled state so the user is prompted to re-authorize.
 
 ## Core API Endpoints
 
 - `GET /health`, `GET /health/ready`
 - `GET /auth/google/callback` (root-level shared OAuth callback redirecting back to `http://localhost:3000`)
 - `GET /api/auth/google/login`, `GET /api/auth/me`
-- `GET /api/auth/youtube/connect`, `GET /api/auth/youtube/channels`, `DELETE /api/auth/youtube/channels/{channel_id}`
+- `GET /api/auth/youtube/connect`, `GET /api/auth/youtube/enable-upload`, `GET /api/auth/youtube/channels`, `DELETE /api/auth/youtube/channels/{channel_id}`
 - `POST /api/campaigns`, `GET /api/campaigns`, `GET /api/campaigns/{id}`, `PATCH /api/campaigns/{id}`, `DELETE /api/campaigns/{id}`
 - `POST /api/campaigns/{id}/sources`, `DELETE /api/campaigns/{id}/sources/{source_id}`
 - `POST /api/permissions`, `GET /api/permissions`, `POST /api/permissions/{id}/revoke`
 - `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}`
 - `PATCH /api/jobs/{id}/clips/{clip_id}/review`, `GET /api/jobs/{id}/clips/{clip_id}/media`
+- `POST /api/jobs/{id}/clips/{clip_id}/upload`, `GET /api/uploads`, `GET /api/uploads/{id}`

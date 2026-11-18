@@ -18,7 +18,12 @@ from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_OAUTH_PURPOSES: frozenset[str] = frozenset({"google_login", "youtube_connect"})
+ALLOWED_OAUTH_PURPOSES: frozenset[str] = frozenset(
+    {"google_login", "youtube_connect", "youtube_upload_connect"}
+)
+_USER_BOUND_OAUTH_PURPOSES: frozenset[str] = frozenset(
+    {"youtube_connect", "youtube_upload_connect"}
+)
 OAUTH_SESSION_COOKIE_NAME = "clipper_oauth_session"
 OAUTH_STATE_TTL_MINUTES = 10
 
@@ -125,8 +130,8 @@ def create_oauth_state(
         raise ValueError(f"Unsupported OAuth state purpose: '{purpose}'.")
     if not session_id:
         raise ValueError("OAuth state must be bound to a non-empty session_id.")
-    if purpose == "youtube_connect" and user_id is None:
-        raise ValueError("youtube_connect OAuth state requires user_id.")
+    if purpose in _USER_BOUND_OAUTH_PURPOSES and user_id is None:
+        raise ValueError(f"{purpose} OAuth state requires user_id.")
 
     cfg = settings or get_settings()
     now = datetime.now(timezone.utc)
@@ -181,7 +186,7 @@ def verify_oauth_state(
     ):
         raise jwt.InvalidTokenError("OAuth state is not bound to the current browser session.")
 
-    if purpose == "youtube_connect" and not payload.get("uid"):
-        raise jwt.InvalidTokenError("YouTube connect state is missing user binding.")
+    if purpose in _USER_BOUND_OAUTH_PURPOSES and not payload.get("uid"):
+        raise jwt.InvalidTokenError("YouTube OAuth state is missing user binding.")
 
     return payload

@@ -14,6 +14,7 @@ from app.models.base import Base, utcnow
 
 if TYPE_CHECKING:
     from app.models.job import Job
+    from app.models.upload import Upload
 
 
 class ReviewStatus(StrEnum):
@@ -58,4 +59,9 @@ class Clip(Base):
     )
 
     job: Mapped[Job] = relationship(back_populates="clips")
+    uploads: Mapped[list[Upload]] = relationship(
+        back_populates="clip",
+        cascade="all, delete-orphan",
+        order_by="Upload.created_at.desc()",
+    )
 

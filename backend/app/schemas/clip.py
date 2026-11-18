@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from app.schemas.upload import UploadResponse
+
 
 class ClipResponse(BaseModel):
     """Clip metadata returned within a Job response."""
@@ -24,6 +26,7 @@ class ClipResponse(BaseModel):
     title: str | None = None
     attribution_text: str | None = None
     review_status: str
+    latest_upload: UploadResponse | None = None
     created_at: datetime
 
 

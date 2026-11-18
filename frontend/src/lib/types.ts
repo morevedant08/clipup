@@ -12,6 +12,10 @@ export type ReviewStatus = "pending" | "approved" | "rejected";
 
 export type SourceMode = "url" | "uploaded_file";
 
+export type UploadStatus = "queued" | "uploading" | "uploaded" | "failed";
+
+export type UploadPrivacy = "private" | "unlisted" | "public";
+
 export interface YouTubeChannel {
   id: string;
   channel_id: string;
@@ -19,6 +23,7 @@ export interface YouTubeChannel {
   handle: string | null;
   thumbnail_url: string | null;
   scopes: string;
+  upload_enabled: boolean;
   connected_at: string;
 }
 
@@ -68,6 +73,26 @@ export interface PermissionDoc {
   created_at: string;
 }
 
+export interface UploadItem {
+  id: string;
+  user_id: string;
+  job_id: string;
+  clip_id: string;
+  youtube_channel_id: string | null;
+  title: string;
+  description: string;
+  tags: string[];
+  privacy: UploadPrivacy;
+  youtube_video_id: string | null;
+  youtube_url: string | null;
+  scheduled_at: string | null;
+  posted_at: string | null;
+  status: UploadStatus;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ClipItem {
   id: string;
   job_id: string;
@@ -79,6 +104,7 @@ export interface ClipItem {
   title: string | null;
   attribution_text: string | null;
   review_status: ReviewStatus;
+  latest_upload?: UploadItem | null;
   created_at: string;
 }
 

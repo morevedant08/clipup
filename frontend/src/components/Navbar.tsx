@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { getYouTubeConnectUrl } from "@/lib/api";
+import { getYouTubeConnectUrl, getYouTubeEnableUploadUrl } from "@/lib/api";
 import type { UserProfile } from "@/lib/types";
 
 interface NavbarProps {
@@ -10,11 +10,15 @@ interface NavbarProps {
 }
 
 export function Navbar({ user, onLogout }: NavbarProps) {
-  const [connecting, setConnecting] = useState(false);
+  const [connecting, setConnecting] = useState<"readonly" | "upload" | null>(
+    null
+  );
   const [connectError, setConnectError] = useState<string | null>(null);
 
+  const hasUploadScope = user.youtube_channels.some((ch) => ch.upload_enabled);
+
   async function handleConnectYouTube() {
-    setConnecting(true);
+    setConnecting("readonly");
     setConnectError(null);
     try {
       const url = await getYouTubeConnectUrl();
@@ -23,7 +27,23 @@ export function Navbar({ user, onLogout }: NavbarProps) {
       setConnectError(
         err instanceof Error ? err.message : "Failed to initiate YouTube connect."
       );
-      setConnecting(false);
+      setConnecting(null);
+    }
+  }
+
+  async function handleEnableUploading() {
+    setConnecting("upload");
+    setConnectError(null);
+    try {
+      const url = await getYouTubeEnableUploadUrl();
+      window.location.href = url;
+    } catch (err) {
+      setConnectError(
+        err instanceof Error
+          ? err.message
+          : "Failed to initiate YouTube upload authorization."
+      );
+      setConnecting(null);
     }
   }
 
@@ -55,11 +75,16 @@ export function Navbar({ user, onLogout }: NavbarProps) {
               {user.youtube_channels.map((ch) => (
                 <span
                   key={ch.id}
-                  title={`Channel ID: ${ch.channel_id} (read-only)`}
+                  title={`Channel ID: ${ch.channel_id} (${ch.upload_enabled ? "upload enabled" : "read-only"})`}
                   className="inline-flex items-center gap-1.5 rounded-full border border-indigo-800/70 bg-indigo-950/60 px-2.5 py-1 text-xs text-indigo-200"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                   {ch.title}
+                  {ch.upload_enabled && (
+                    <span className="rounded bg-emerald-900/80 px-1 py-0.2 text-[10px] font-semibold text-emerald-200">
+                      Upload
+                    </span>
+                  )}
                 </span>
               ))}
             </div>
@@ -70,10 +95,29 @@ export function Navbar({ user, onLogout }: NavbarProps) {
           <button
             type="button"
             onClick={handleConnectYouTube}
-            disabled={connecting}
+            disabled={connecting !== null}
             className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-indigo-500 hover:text-white disabled:opacity-50"
           >
-            {connecting ? "Redirecting..." : "Connect YouTube (Read-Only)"}
+            {connecting === "readonly"
+              ? "Redirecting..."
+              : "Connect YouTube (Read-Only)"}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleEnableUploading}
+            disabled={connecting !== null}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:opacity-50 ${
+              hasUploadScope
+                ? "border border-emerald-700/70 bg-emerald-950/60 text-emerald-200 hover:bg-emerald-900/60"
+                : "bg-indigo-600 text-white hover:bg-indigo-500"
+            }`}
+          >
+            {connecting === "upload"
+              ? "Redirecting..."
+              : hasUploadScope
+                ? "Re-authorize Uploading"
+                : "Enable uploading"}
           </button>
 
           <button
@@ -95,4 +139,3 @@ export function Navbar({ user, onLogout }: NavbarProps) {
     </header>
   );
 }
-

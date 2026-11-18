@@ -20,6 +20,7 @@ from app.api.deps import (
     get_job_dispatcher,
     get_youtube_service,
 )
+from app.api.uploads import serialize_upload
 from app.config import get_settings
 from app.database import get_db
 from app.models.campaign import Campaign
@@ -78,6 +79,7 @@ def _serialize_job(job: Job) -> JobResponse:
             title=clip.title,
             attribution_text=clip.attribution_text,
             review_status=clip.review_status,
+            latest_upload=serialize_upload(clip.uploads[0]) if clip.uploads else None,
             created_at=clip.created_at,
         )
         for clip in job.clips
@@ -402,7 +404,7 @@ async def create_job(
 
     reloaded = (
         db.query(Job)
-        .options(selectinload(Job.clips))
+        .options(selectinload(Job.clips).selectinload(Clip.uploads))
         .filter(Job.id == job.id)
         .one()
     )
@@ -418,7 +420,7 @@ def list_jobs(
     """List the authenticated user's clipping jobs (most recent first)."""
     query = (
         db.query(Job)
-        .options(selectinload(Job.clips))
+        .options(selectinload(Job.clips).selectinload(Clip.uploads))
         .filter(Job.user_id == current_user.id)
         .order_by(Job.created_at.desc())
     )
@@ -437,7 +439,7 @@ def get_job(
     """Retrieve a single job and its generated clips."""
     job = (
         db.query(Job)
-        .options(selectinload(Job.clips))
+        .options(selectinload(Job.clips).selectinload(Clip.uploads))
         .filter(Job.id == job_id, Job.user_id == current_user.id)
         .first()
     )
@@ -460,6 +462,7 @@ def update_clip_review_status(
     """Approve or reject a generated clip during human review."""
     clip = (
         db.query(Clip)
+        .options(selectinload(Clip.uploads))
         .join(Job, Clip.job_id == Job.id)
         .filter(
             Clip.id == clip_id,
@@ -495,6 +498,7 @@ def update_clip_review_status(
         title=clip.title,
         attribution_text=clip.attribution_text,
         review_status=clip.review_status,
+        latest_upload=serialize_upload(clip.uploads[0]) if clip.uploads else None,
         created_at=clip.created_at,
     )
 
@@ -509,6 +513,7 @@ def stream_clip_media(
     """Serve a generated clip MP4 file safely from STORAGE_ROOT."""
     clip = (
         db.query(Clip)
+        .options(selectinload(Clip.uploads))
         .join(Job, Clip.job_id == Job.id)
         .filter(
             Clip.id == clip_id,

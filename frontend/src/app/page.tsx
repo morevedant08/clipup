@@ -20,6 +20,7 @@ import type {
   ClipItem,
   JobItem,
   PermissionDoc,
+  UploadItem,
   UserProfile,
 } from "@/lib/types";
 
@@ -39,6 +40,12 @@ export default function HomePage() {
       const count = params.get("channels") || "1";
       setOauthNotice(
         `Connected ${count} YouTube channel(s) with read-only permissions.`
+      );
+      window.history.replaceState(null, "", "/");
+    } else if (params.get("youtube_upload_enabled") === "1") {
+      const count = params.get("channels") || "1";
+      setOauthNotice(
+        `Enabled YouTube Shorts uploading for ${count} channel(s).`
       );
       window.history.replaceState(null, "", "/");
     }
@@ -83,13 +90,21 @@ export default function HomePage() {
       .finally(() => setBooting(false));
   }, [loadWorkspaceData]);
 
-  // Poll automatically while any job is queued or processing
+  // Poll automatically while any job or immediate upload is in progress
   useEffect(() => {
     if (!user) return;
-    const hasActiveJob = jobs.some(
-      (j) => j.status === "queued" || j.status === "processing"
+    const hasActiveWork = jobs.some(
+      (j) =>
+        j.status === "queued" ||
+        j.status === "processing" ||
+        j.clips.some(
+          (c) =>
+            c.latest_upload?.status === "uploading" ||
+            (c.latest_upload?.status === "queued" &&
+              !c.latest_upload.scheduled_at)
+        )
     );
-    if (!hasActiveJob) return;
+    if (!hasActiveWork) return;
 
     const timer = window.setInterval(() => {
       fetchJobs()
@@ -131,6 +146,25 @@ export default function HomePage() {
               ...job,
               clips: job.clips.map((c) =>
                 c.id === updatedClip.id ? updatedClip : c
+              ),
+            }
+      )
+    );
+  }
+
+  function handleUploadQueued(
+    jobId: string,
+    clipId: string,
+    upload: UploadItem
+  ) {
+    setJobs((prev) =>
+      prev.map((job) =>
+        job.id !== jobId
+          ? job
+          : {
+              ...job,
+              clips: job.clips.map((c) =>
+                c.id === clipId ? { ...c, latest_upload: upload } : c
               ),
             }
       )
@@ -189,7 +223,9 @@ export default function HomePage() {
         {selectedJob && (
           <ClipPreviewGrid
             job={selectedJob}
+            uploadEnabled={user.youtube_channels.some((c) => c.upload_enabled)}
             onClipUpdated={handleClipUpdated}
+            onUploadQueued={handleUploadQueued}
           />
         )}
       </main>

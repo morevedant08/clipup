@@ -1,6 +1,11 @@
 "use client";
 
-import type { JobStatus, ReviewStatus, RightsBasis } from "@/lib/types";
+import type {
+  JobStatus,
+  ReviewStatus,
+  RightsBasis,
+  UploadStatus,
+} from "@/lib/types";
 
 const STATUS_STYLES: Record<JobStatus, string> = {
   pending_rights: "bg-slate-800 text-slate-300 border-slate-700",
@@ -72,6 +77,32 @@ export function ReviewBadge({ status }: { status: ReviewStatus }) {
       className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${styles[status]}`}
     >
       {status}
+    </span>
+  );
+}
+
+export function UploadStatusBadge({
+  status,
+  scheduledAt,
+}: {
+  status: UploadStatus;
+  scheduledAt?: string | null;
+}) {
+  const styles: Record<UploadStatus, string> = {
+    queued: "border-amber-700/80 bg-amber-950/70 text-amber-200",
+    uploading: "border-sky-700/80 bg-sky-950/70 text-sky-200 animate-pulse",
+    uploaded: "border-emerald-700/80 bg-emerald-950/80 text-emerald-200",
+    failed: "border-rose-700/80 bg-rose-950/70 text-rose-200",
+  };
+  const label =
+    status === "queued" && scheduledAt
+      ? "Scheduled"
+      : status.charAt(0).toUpperCase() + status.slice(1);
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${styles[status]}`}
+    >
+      Upload: {label}
     </span>
   );
 }

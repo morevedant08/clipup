@@ -19,6 +19,7 @@ class YouTubeChannelResponse(BaseModel):
     handle: str | None = None
     thumbnail_url: str | None = None
     scopes: str
+    upload_enabled: bool = False
     connected_at: datetime
 
 

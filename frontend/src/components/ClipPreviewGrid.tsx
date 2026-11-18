@@ -3,15 +3,37 @@
 import { useState } from "react";
 import {
   buildMediaUrl,
+  queueClipUpload,
   shouldSuggestFileUpload,
   updateClipReview,
 } from "@/lib/api";
-import type { ClipItem, JobItem, ReviewStatus } from "@/lib/types";
-import { ReviewBadge, RightsBasisBadge, StatusBadge } from "./Badges";
+import type {
+  ClipItem,
+  JobItem,
+  ReviewStatus,
+  UploadItem,
+  UploadPrivacy,
+} from "@/lib/types";
+import {
+  ReviewBadge,
+  RightsBasisBadge,
+  StatusBadge,
+  UploadStatusBadge,
+} from "./Badges";
 
 interface ClipPreviewGridProps {
   job: JobItem;
+  uploadEnabled: boolean;
   onClipUpdated: (jobId: string, updatedClip: ClipItem) => void;
+  onUploadQueued: (jobId: string, clipId: string, upload: UploadItem) => void;
+}
+
+interface UploadDraft {
+  title: string;
+  description: string;
+  tagsRaw: string;
+  privacy: UploadPrivacy;
+  scheduledAt: string;
 }
 
 function formatSeconds(sec: number): string {
@@ -20,9 +42,18 @@ function formatSeconds(sec: number): string {
   return `${mins}:${rem.toString().padStart(2, "0")}`;
 }
 
-export function ClipPreviewGrid({ job, onClipUpdated }: ClipPreviewGridProps) {
+export function ClipPreviewGrid({
+  job,
+  uploadEnabled,
+  onClipUpdated,
+  onUploadQueued,
+}: ClipPreviewGridProps) {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [openUploadClipId, setOpenUploadClipId] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, UploadDraft>>({});
+  const [uploadingClipId, setUploadingClipId] = useState<string | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<Record<string, string>>({});
 
   async function handleReview(clip: ClipItem, decision: ReviewStatus) {
     setUpdatingId(clip.id);
@@ -30,12 +61,89 @@ export function ClipPreviewGrid({ job, onClipUpdated }: ClipPreviewGridProps) {
     try {
       const updated = await updateClipReview(job.id, clip.id, decision);
       onClipUpdated(job.id, updated);
+      if (decision !== "approved" && openUploadClipId === clip.id) {
+        setOpenUploadClipId(null);
+      }
     } catch (err) {
       setReviewError(
         err instanceof Error ? err.message : "Failed to update clip review."
       );
     } finally {
       setUpdatingId(null);
+    }
+  }
+
+  function openUploadEditor(clip: ClipItem) {
+    setDrafts((prev) => {
+      if (prev[clip.id]) return prev;
+      return {
+        ...prev,
+        [clip.id]: {
+          title: clip.title || job.source_title || "Clipper Short",
+          description: "",
+          tagsRaw: "Shorts",
+          privacy: "private",
+          scheduledAt: "",
+        },
+      };
+    });
+    setOpenUploadClipId((curr) => (curr === clip.id ? null : clip.id));
+  }
+
+  function updateDraft(clipId: string, patch: Partial<UploadDraft>) {
+    setDrafts((prev) => ({
+      ...prev,
+      [clipId]: {
+        ...(prev[clipId] || {
+          title: "",
+          description: "",
+          tagsRaw: "",
+          privacy: "private",
+          scheduledAt: "",
+        }),
+        ...patch,
+      },
+    }));
+  }
+
+  async function handleSubmitUpload(e: React.FormEvent, clip: ClipItem) {
+    e.preventDefault();
+    const draft = drafts[clip.id];
+    if (!draft) return;
+
+    setUploadingClipId(clip.id);
+    setUploadErrors((prev) => {
+      const next = { ...prev };
+      delete next[clip.id];
+      return next;
+    });
+
+    try {
+      const tags = draft.tagsRaw
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const scheduledIso = draft.scheduledAt
+        ? new Date(draft.scheduledAt).toISOString()
+        : null;
+
+      const created = await queueClipUpload(job.id, clip.id, {
+        title: draft.title.trim(),
+        description: draft.description,
+        tags,
+        privacy: draft.privacy,
+        scheduled_at: scheduledIso,
+      });
+      onUploadQueued(job.id, clip.id, created);
+      setOpenUploadClipId(null);
+    } catch (err) {
+      setUploadErrors((prev) => ({
+        ...prev,
+        [clip.id]:
+          err instanceof Error ? err.message : "Failed to queue YouTube upload.",
+      }));
+    } finally {
+      setUploadingClipId(null);
     }
   }
 
@@ -116,6 +224,11 @@ export function ClipPreviewGrid({ job, onClipUpdated }: ClipPreviewGridProps) {
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {job.clips.map((clip) => {
             const videoUrl = buildMediaUrl(clip.preview_url);
+            const latestUpload = clip.latest_upload || null;
+            const isUploadEditorOpen = openUploadClipId === clip.id;
+            const draft = drafts[clip.id];
+            const clipUploadError = uploadErrors[clip.id];
+
             return (
               <div
                 key={clip.id}
@@ -160,33 +273,214 @@ export function ClipPreviewGrid({ job, onClipUpdated }: ClipPreviewGridProps) {
                         {clip.attribution_text}
                       </div>
                     )}
+
+                    {latestUpload && (
+                      <div className="mt-3 space-y-1.5 rounded-lg border border-slate-800 bg-slate-900/70 p-2.5 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-1.5">
+                          <UploadStatusBadge
+                            status={latestUpload.status}
+                            scheduledAt={latestUpload.scheduled_at}
+                          />
+                          <span className="text-[11px] capitalize text-slate-400">
+                            {latestUpload.privacy}
+                          </span>
+                        </div>
+                        {latestUpload.scheduled_at &&
+                          latestUpload.status === "queued" && (
+                            <p className="text-[11px] text-amber-200">
+                              Scheduled:{" "}
+                              {new Date(latestUpload.scheduled_at).toLocaleString()}
+                            </p>
+                          )}
+                        {latestUpload.status === "uploaded" &&
+                          latestUpload.youtube_url && (
+                            <a
+                              href={latestUpload.youtube_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-block text-[11px] font-medium text-emerald-300 hover:underline"
+                            >
+                              View Short on YouTube →
+                            </a>
+                          )}
+                        {latestUpload.status === "failed" && latestUpload.error && (
+                          <p className="text-[11px] text-rose-300">
+                            {latestUpload.error}
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
-                  <div className="mt-4 grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      disabled={updatingId === clip.id}
-                      onClick={() => handleReview(clip, "approved")}
-                      className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                        clip.review_status === "approved"
-                          ? "bg-emerald-600 text-white"
-                          : "border border-emerald-800/70 bg-emerald-950/50 text-emerald-300 hover:bg-emerald-900/60"
-                      }`}
-                    >
-                      Approve
-                    </button>
-                    <button
-                      type="button"
-                      disabled={updatingId === clip.id}
-                      onClick={() => handleReview(clip, "rejected")}
-                      className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                        clip.review_status === "rejected"
-                          ? "bg-rose-600 text-white"
-                          : "border border-rose-800/70 bg-rose-950/50 text-rose-300 hover:bg-rose-900/60"
-                      }`}
-                    >
-                      Reject
-                    </button>
+                  <div className="mt-4 space-y-2.5">
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        disabled={updatingId === clip.id}
+                        onClick={() => handleReview(clip, "approved")}
+                        className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                          clip.review_status === "approved"
+                            ? "bg-emerald-600 text-white"
+                            : "border border-emerald-800/70 bg-emerald-950/50 text-emerald-300 hover:bg-emerald-900/60"
+                        }`}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        disabled={updatingId === clip.id}
+                        onClick={() => handleReview(clip, "rejected")}
+                        className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                          clip.review_status === "rejected"
+                            ? "bg-rose-600 text-white"
+                            : "border border-rose-800/70 bg-rose-950/50 text-rose-300 hover:bg-rose-900/60"
+                        }`}
+                      >
+                        Reject
+                      </button>
+                    </div>
+
+                    {clip.review_status === "approved" ? (
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => openUploadEditor(clip)}
+                          className="w-full rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500"
+                        >
+                          {isUploadEditorOpen
+                            ? "Cancel Upload"
+                            : latestUpload?.status === "uploaded"
+                              ? "Upload Again to YouTube"
+                              : "Upload to YouTube"}
+                        </button>
+
+                        {isUploadEditorOpen && draft && (
+                          <form
+                            onSubmit={(e) => handleSubmitUpload(e, clip)}
+                            className="mt-3 space-y-2.5 rounded-xl border border-slate-800 bg-slate-900/80 p-3"
+                          >
+                            {!uploadEnabled && (
+                              <p className="rounded-md border border-amber-800/80 bg-amber-950/60 p-2 text-[11px] text-amber-200">
+                                Click <strong>Enable uploading</strong> in the top bar first to grant YouTube upload permission.
+                              </p>
+                            )}
+
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-300">
+                                Title (max 100 chars)
+                              </label>
+                              <input
+                                type="text"
+                                required
+                                maxLength={100}
+                                value={draft.title}
+                                onChange={(e) =>
+                                  updateDraft(clip.id, { title: e.target.value })
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-300">
+                                Description
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={draft.description}
+                                onChange={(e) =>
+                                  updateDraft(clip.id, {
+                                    description: e.target.value,
+                                  })
+                                }
+                                placeholder="Add your own description..."
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                              />
+                              <p className="mt-1 text-[10px] text-slate-400">
+                                #Shorts
+                                {job.rights_basis === "cc" && " + CC attribution"}
+                                {job.campaign_id && " + campaign hashtags"} added
+                                automatically.
+                              </p>
+                            </div>
+
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-300">
+                                Tags (comma-separated)
+                              </label>
+                              <input
+                                type="text"
+                                value={draft.tagsRaw}
+                                onChange={(e) =>
+                                  updateDraft(clip.id, { tagsRaw: e.target.value })
+                                }
+                                placeholder="Shorts, podcast, highlights"
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="mb-1 block text-[11px] text-slate-300">
+                                  Privacy
+                                </label>
+                                <select
+                                  value={draft.privacy}
+                                  onChange={(e) =>
+                                    updateDraft(clip.id, {
+                                      privacy: e.target.value as UploadPrivacy,
+                                    })
+                                  }
+                                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                                >
+                                  <option value="private">Private</option>
+                                  <option value="unlisted">Unlisted</option>
+                                  <option value="public">Public</option>
+                                </select>
+                              </div>
+
+                              <div>
+                                <label className="mb-1 block text-[11px] text-slate-300">
+                                  Schedule (optional)
+                                </label>
+                                <input
+                                  type="datetime-local"
+                                  value={draft.scheduledAt}
+                                  onChange={(e) =>
+                                    updateDraft(clip.id, {
+                                      scheduledAt: e.target.value,
+                                    })
+                                  }
+                                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-white focus:border-indigo-500 focus:outline-none"
+                                />
+                              </div>
+                            </div>
+
+                            {clipUploadError && (
+                              <p className="rounded-md border border-rose-800/80 bg-rose-950/60 p-2 text-[11px] text-rose-200">
+                                {clipUploadError}
+                              </p>
+                            )}
+
+                            <button
+                              type="submit"
+                              disabled={!uploadEnabled || uploadingClipId === clip.id}
+                              className="w-full rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                            >
+                              {uploadingClipId === clip.id
+                                ? "Re-checking Rights & Queueing..."
+                                : draft.scheduledAt
+                                  ? "Schedule Short Upload"
+                                  : "Publish Short Now"}
+                            </button>
+                          </form>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-center text-[11px] text-slate-500">
+                        Approve clip to enable YouTube upload.
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -197,4 +491,3 @@ export function ClipPreviewGrid({ job, onClipUpdated }: ClipPreviewGridProps) {
     </section>
   );
 }
-

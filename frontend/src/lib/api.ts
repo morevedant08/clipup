@@ -4,6 +4,8 @@ import type {
   JobItem,
   PermissionDoc,
   ReviewStatus,
+  UploadItem,
+  UploadPrivacy,
   UserProfile,
 } from "./types";
 
@@ -122,6 +124,13 @@ export async function getYouTubeConnectUrl(): Promise<string> {
   return data.auth_url;
 }
 
+export async function getYouTubeEnableUploadUrl(): Promise<string> {
+  const data = await apiFetch<{ auth_url: string }>(
+    "/api/auth/youtube/enable-upload"
+  );
+  return data.auth_url;
+}
+
 // --- Campaigns ---
 
 export async function fetchCampaigns(): Promise<Campaign[]> {
@@ -232,6 +241,26 @@ export async function updateClipReview(
     {
       method: "PATCH",
       body: JSON.stringify({ review_status: reviewStatus }),
+    }
+  );
+}
+
+export async function queueClipUpload(
+  jobId: string,
+  clipId: string,
+  payload: {
+    title: string;
+    description: string;
+    tags: string[];
+    privacy: UploadPrivacy;
+    scheduled_at?: string | null;
+  }
+): Promise<UploadItem> {
+  return apiFetch<UploadItem>(
+    `/api/jobs/${jobId}/clips/${clipId}/upload`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
     }
   );
 }

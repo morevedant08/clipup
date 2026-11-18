@@ -58,3 +58,8 @@ class YouTubeChannel(Base):
 
     user: Mapped[User] = relationship(back_populates="youtube_channels")
 
+    @property
+    def upload_enabled(self) -> bool:
+        """Return True when this channel's OAuth token includes the youtube.upload scope."""
+        return "https://www.googleapis.com/auth/youtube.upload" in (self.scopes or "").split()
+
