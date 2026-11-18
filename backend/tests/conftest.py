@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.deps import get_youtube_service
+from app.api.deps import get_job_dispatcher, get_youtube_service
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.main import create_app
@@ -123,9 +123,15 @@ def fake_youtube(test_settings: Settings) -> FakeYouTubeService:
 
 
 @pytest.fixture()
+def dispatched_jobs() -> list[str]:
+    return []
+
+
+@pytest.fixture()
 def client(
     db_session: Session,
     fake_youtube: FakeYouTubeService,
+    dispatched_jobs: list[str],
     test_settings: Settings,
 ) -> Generator[TestClient, None, None]:
     app = create_app()
@@ -133,8 +139,13 @@ def client(
     def _override_get_db() -> Generator[Session, None, None]:
         yield db_session
 
+    def _fake_dispatcher(job_id) -> str:
+        dispatched_jobs.append(str(job_id))
+        return f"fake-task-{job_id}"
+
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_youtube_service] = lambda: fake_youtube
+    app.dependency_overrides[get_job_dispatcher] = lambda: _fake_dispatcher
 
     with TestClient(app) as test_client:
         yield test_client
