@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -118,6 +120,8 @@ def test_post_jobs_queues_on_campaign_basis(
             "name": "Creator Launch",
             "rules_text": "Include #Launch",
             "deadline": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
+            "proof_url": "https://creator.example.com/terms",
+            "attested": True,
             "sources": [{"source_url": "https://youtu.be/campVid1234"}],
         },
     )
@@ -316,7 +320,10 @@ def test_source_upload_accepted_after_rights_pass_and_audited(
     fake_youtube: FakeYouTubeService,
     dispatched_jobs: list[str],
     test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("app.api.jobs.probe_video_duration", lambda path: 300.0)
+
     fake_youtube.videos_by_id["ccUpload123"] = VideoMetadata(
         video_id="ccUpload123",
         channel_id="UC_OPEN_EDU_12345678901",
@@ -426,3 +433,85 @@ def test_source_upload_rejects_invalid_extension_fake_header_and_oversized_file(
     # Ensure no partial/stale uploaded files remain on disk
     uploads_dir = test_settings.storage_path / "uploads"
     assert not uploads_dir.exists() or [p for p in uploads_dir.rglob("*") if p.is_file()] == []
+
+
+def test_source_upload_rejects_duration_mismatch(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    fake_youtube: FakeYouTubeService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploaded source files with mismatched duration relative to verified video must be rejected."""
+    fake_youtube.videos_by_id["ccDurMis123"] = VideoMetadata(
+        video_id="ccDurMis123",
+        channel_id="UC_OPEN_001",
+        channel_title="Open Lectures",
+        title="CC Lecture",
+        license="creativeCommon",
+        duration_sec=300,
+    )
+    # Mock probe returning 50.0 seconds (well outside tolerance of 300s)
+    monkeypatch.setattr("app.api.jobs.probe_video_duration", lambda path: 50.0)
+
+    resp = client.post(
+        "/api/jobs",
+        headers=auth_headers,
+        data={
+            "source_url": "https://www.youtube.com/watch?v=ccDurMis123",
+            "clip_count": "2",
+        },
+        files={"source_file": ("mismatch.webm", _VALID_WEBM_BYTES, "video/webm")},
+    )
+    assert resp.status_code == 400
+    assert "does not match verified YouTube video duration" in resp.json()["detail"]
+
+
+def test_post_jobs_rejects_another_users_campaign_id(
+    client: TestClient,
+    db_session: Session,
+    auth_headers: dict[str, str],
+    fake_youtube: FakeYouTubeService,
+) -> None:
+    """POST /api/jobs must return 404 if the selected campaign belongs to another user."""
+    user_b = User(
+        id=uuid.uuid4(),
+        email="owner_b@example.com",
+        google_sub="sub_owner_b",
+    )
+    db_session.add(user_b)
+    db_session.commit()
+    token_b = create_access_token(user_b.id, user_b.email)
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    create_resp = client.post(
+        "/api/campaigns",
+        headers=headers_b,
+        json={
+            "name": "User B Campaign",
+            "proof_url": "https://creator.example.com/terms",
+            "attested": True,
+            "sources": [{"source_url": "https://youtu.be/campVidUsrB"}],
+        },
+    )
+    assert create_resp.status_code == 201
+    campaign_id_b = create_resp.json()["id"]
+
+    fake_youtube.videos_by_id["campVidUsrB"] = VideoMetadata(
+        video_id="campVidUsrB",
+        channel_id="UC_BRAND_B",
+        channel_title="Brand B",
+        title="Keynote B",
+        license="youtube",
+        duration_sec=600,
+    )
+
+    resp = client.post(
+        "/api/jobs",
+        headers=auth_headers,
+        json={
+            "source_url": "https://www.youtube.com/watch?v=campVidUsrB",
+            "campaign_id": campaign_id_b,
+        },
+    )
+    assert resp.status_code == 404
+    assert "campaign was not found" in resp.json()["detail"].lower()

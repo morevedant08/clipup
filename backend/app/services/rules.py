@@ -35,8 +35,28 @@ def evaluate_campaign_eligibility(
     *,
     now: datetime | None = None,
 ) -> CampaignRuleEvaluation:
-    """Validate whether a campaign is active and before its submission deadline."""
+    """Validate whether a campaign is active, within its deadline, and backed by proof & attestation."""
     current_time = _ensure_utc(now or datetime.now(timezone.utc))
+
+    has_proof = bool(campaign.proof_url and campaign.proof_url.strip()) or bool(
+        campaign.proof_document_sha256
+    )
+    has_attestation = campaign.attested_at is not None
+    if not (has_proof and has_attestation):
+        missing: list[str] = []
+        if not has_proof:
+            missing.append("terms URL or proof document")
+        if not has_attestation:
+            missing.append("attestation timestamp")
+        return CampaignRuleEvaluation(
+            is_eligible=False,
+            reason=(
+                f"Campaign '{campaign.name}' lacks required authorization proof "
+                f"({', '.join(missing)} missing)."
+            ),
+            rules_text=campaign.rules_text,
+            deadline=campaign.deadline,
+        )
 
     if not campaign.is_active:
         return CampaignRuleEvaluation(

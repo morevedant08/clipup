@@ -225,12 +225,17 @@ def test_upload_blocked_when_rights_basis_is_revoked_before_upload(
 ) -> None:
     channel = _create_upload_enabled_channel(db_session, test_user, test_settings)
     partner_channel = "UC_PARTNER_REVOKED_0001"
+    doc_file = test_settings.storage_path / "permissions" / "test" / "doc.pdf"
+    doc_file.parent.mkdir(parents=True, exist_ok=True)
+    doc_file.write_bytes(b"%PDF-1.4 valid test permission")
+
     perm = Permission(
         user_id=test_user.id,
         channel_id=partner_channel,
         document_path="permissions/test/doc.pdf",
         document_sha256="c" * 64,
         original_filename="signed.pdf",
+        scope="Shorts upload allowed",
         revoked=False,
     )
     db_session.add(perm)
@@ -254,11 +259,11 @@ def test_upload_blocked_when_rights_basis_is_revoked_before_upload(
         duration_sec=120,
     )
 
-    # Queue upload while permission is valid
+    # Queue upload while permission is valid (with self_attested_confirmed)
     queue_resp = client.post(
         f"/api/jobs/{job.id}/clips/{clip.id}/upload",
         headers=auth_headers,
-        json={"title": "Partner Short"},
+        json={"title": "Partner Short", "self_attested_confirmed": True},
     )
     assert queue_resp.status_code == 201
     upload_id = uuid.UUID(queue_resp.json()["id"])
@@ -375,6 +380,8 @@ def test_campaign_upload_includes_required_campaign_hashtags(
         rules_text="Must include #PodcastClips and #CreatorLaunch in description.",
         deadline=datetime.now(timezone.utc) + timedelta(days=5),
         is_active=True,
+        proof_url="https://creator.example.com/podcast-terms",
+        attested_at=datetime.now(timezone.utc),
     )
     db_session.add(campaign)
     db_session.flush()
@@ -413,6 +420,7 @@ def test_campaign_upload_includes_required_campaign_hashtags(
             "title": "Best Moment",
             "description": "Wild takeaway.",
             "privacy": "unlisted",
+            "self_attested_confirmed": True,
         },
     )
     assert resp.status_code == 201
@@ -604,3 +612,119 @@ def test_scheduled_upload_dispatched_only_when_due(
         now=future_time + timedelta(minutes=2),
     )
     assert dispatched_again == []
+
+
+def test_self_attested_upload_blocked_without_explicit_confirmation(
+    client: TestClient,
+    db_session: Session,
+    test_user: User,
+    auth_headers: dict[str, str],
+    fake_youtube: FakeYouTubeService,
+    test_settings: Settings,
+) -> None:
+    """Clips on self-attested basis require self_attested_confirmed=True to queue upload."""
+    _create_upload_enabled_channel(db_session, test_user, test_settings)
+    campaign = Campaign(
+        owner_user_id=test_user.id,
+        name="Self Attested Campaign",
+        proof_url="https://creator.example.com/terms",
+        attested_at=datetime.now(timezone.utc),
+        is_active=True,
+    )
+    db_session.add(campaign)
+    db_session.flush()
+    db_session.add(
+        CampaignSource(
+            campaign_id=campaign.id,
+            source_url="https://www.youtube.com/watch?v=campConf001",
+            normalized_video_id="campConf001",
+            source_type="video",
+        )
+    )
+    db_session.commit()
+
+    job, clip = _create_job_and_clip(
+        db_session,
+        test_user,
+        test_settings,
+        video_id="campConf001",
+        rights_basis=RightsBasis.CAMPAIGN,
+        review_status=ReviewStatus.APPROVED,
+        campaign=campaign,
+    )
+    # Ensure evidence reflects self_attested
+    job.rights_evidence_json = {"allowed": True, "basis": "campaign", "verification_level": "self_attested"}
+    db_session.commit()
+
+    fake_youtube.videos_by_id["campConf001"] = VideoMetadata(
+        video_id="campConf001",
+        channel_id="UC_BRAND_CONF",
+        channel_title="Brand",
+        title="Title",
+        license="youtube",
+        duration_sec=300,
+    )
+
+    # Without confirmation -> 400 Bad Request
+    resp = client.post(
+        f"/api/jobs/{job.id}/clips/{clip.id}/upload",
+        headers=auth_headers,
+        json={"title": "Unconfirmed Short", "self_attested_confirmed": False},
+    )
+    assert resp.status_code == 400
+    assert "self-attested" in resp.json()["detail"].lower()
+
+
+def test_pre_upload_recheck_fails_closed_when_video_becomes_unavailable(
+    db_session: Session,
+    test_user: User,
+    test_settings: Settings,
+) -> None:
+    """Pre-upload live re-check must fail closed when video is deleted or unavailable."""
+    channel = _create_upload_enabled_channel(db_session, test_user, test_settings)
+    job, clip = _create_job_and_clip(
+        db_session,
+        test_user,
+        test_settings,
+        video_id="deletedVid1",
+        rights_basis=RightsBasis.OWNER,
+        review_status=ReviewStatus.APPROVED,
+    )
+    upload = Upload(
+        user_id=test_user.id,
+        job_id=job.id,
+        clip_id=clip.id,
+        youtube_channel_id=channel.id,
+        title="Deleted Video Short",
+        description="#Shorts",
+        tags_json=[],
+        privacy="private",
+        status=UploadStatus.QUEUED.value,
+    )
+    db_session.add(upload)
+    db_session.commit()
+
+    class MissingVideoYouTubeService:
+        def refresh_access_token(self, token: str) -> str:
+            return "fake-token"
+
+        def fetch_video_metadata(self, video_id: str, access_token: str | None = None) -> VideoMetadata:
+            from app.services.youtube import YouTubeAPIError
+            raise YouTubeAPIError(f"YouTube video '{video_id}' was not found or is private.")
+
+    result = execute_clip_upload(
+        db_session,
+        upload.id,
+        youtube_service=MissingVideoYouTubeService(),  # type: ignore[arg-type]
+    )
+    assert result.status == UploadStatus.FAILED.value
+    assert "was not found or is private" in (result.error or "")
+
+    audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action == "upload.rights_blocked")
+        .order_by(AuditLog.created_at.desc())
+        .first()
+    )
+    assert audit is not None
+    assert "was not found or is private" in str(audit.details_json)

@@ -28,6 +28,7 @@ MAX_PERMISSION_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 async def upload_permission_document(
     channel_id: str = Form(..., min_length=3, max_length=64),
     channel_name: str | None = Form(default=None),
+    scope: str | None = Form(default=None),
     notes: str | None = Form(default=None),
     expires_at: datetime | None = Form(default=None),
     file: UploadFile = File(...),
@@ -75,6 +76,7 @@ async def upload_permission_document(
         document_path=relative_path,
         document_sha256=digest,
         original_filename=original_name,
+        scope=scope.strip() if scope else None,
         notes=notes,
         expires_at=expires_at,
         revoked=False,
@@ -90,6 +92,7 @@ async def upload_permission_document(
             "permission_id": str(permission.id),
             "channel_id": permission.channel_id,
             "document_sha256": digest,
+            "scope": permission.scope,
         },
     )
     db.commit()

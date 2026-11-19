@@ -7,14 +7,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
 from app.models.campaign import Campaign, CampaignSource
 from app.models.job import Job, JobStatus, RightsBasis
 from app.models.permission import Permission
+from app.models.user import User
 from app.models.youtube_channel import YouTubeChannel
 from app.services.rights import (
     RightsGateError,
     assert_job_rights_approved,
     evaluate_rights,
+    reverify_job_rights,
 )
 from app.services.youtube import VideoMetadata
 
@@ -57,6 +62,10 @@ def _make_campaign(
     is_active: bool = True,
     deadline: datetime | None = None,
     rules_text: str = "Add campaign hashtag.",
+    proof_url: str | None = "https://creator.example.com/campaign-terms",
+    proof_document_sha256: str | None = None,
+    proof_document_path: str | None = None,
+    attested: bool = True,
 ) -> Campaign:
     campaign_id = uuid.uuid4()
     campaign = Campaign(
@@ -66,6 +75,10 @@ def _make_campaign(
         rules_text=rules_text,
         is_active=is_active,
         deadline=deadline,
+        proof_url=proof_url,
+        proof_document_sha256=proof_document_sha256,
+        proof_document_path=proof_document_path,
+        attested_at=datetime.now(timezone.utc) if attested else None,
     )
     sources: list[CampaignSource] = []
     for vid in video_ids or []:
@@ -99,7 +112,16 @@ def _make_permission(
     expires_at: datetime | None = None,
     document_path: str = "permissions/user/doc.pdf",
     document_sha256: str = "b" * 64,
+    scope: str | None = "Full Shorts clipping rights",
+    create_file_on_disk: bool = True,
 ) -> Permission:
+    settings = get_settings()
+    if create_file_on_disk:
+        disk_path = settings.storage_path / document_path
+        disk_path.parent.mkdir(parents=True, exist_ok=True)
+        if not disk_path.is_file():
+            disk_path.write_bytes(b"%PDF-1.4 dummy permission document")
+
     return Permission(
         id=uuid.uuid4(),
         user_id=uuid.uuid4(),
@@ -108,6 +130,7 @@ def _make_permission(
         document_path=document_path,
         document_sha256=document_sha256,
         original_filename="signed_permission.pdf",
+        scope=scope,
         revoked=revoked,
         expires_at=expires_at,
     )
@@ -370,4 +393,110 @@ def test_cc_job_without_attribution_is_blocked_by_rights_gate() -> None:
     )
     with pytest.raises(RightsGateError, match="attribution"):
         assert_job_rights_approved(cc_without_attribution)
+
+
+def test_campaign_without_proof_or_attestation_rejected() -> None:
+    """Campaigns without terms URL / proof document or attestation cannot pass rights gate."""
+    video = _make_video(video_id="campVid1")
+
+    # Missing proof
+    camp_no_proof = _make_campaign(video_ids=["campVid1"], proof_url=None)
+    decision = evaluate_rights(video=video, connected_channels=[], campaign=camp_no_proof)
+    assert decision.allowed is False
+    assert "lacks required authorization proof" in decision.reason
+
+    # Missing attestation
+    camp_no_attestation = _make_campaign(video_ids=["campVid1"], attested=False)
+    decision2 = evaluate_rights(video=video, connected_channels=[], campaign=camp_no_attestation)
+    assert decision2.allowed is False
+    assert "lacks required authorization proof" in decision2.reason
+
+
+def test_permission_with_missing_file_rejected() -> None:
+    """Permission document records where file does not exist on disk must be rejected."""
+    video = _make_video(channel_id="UC_PARTNER_MISSING_FILE")
+    perm = _make_permission(
+        "UC_PARTNER_MISSING_FILE",
+        document_path="permissions/missing/nonexistent_file.pdf",
+        create_file_on_disk=False,
+    )
+    decision = evaluate_rights(video=video, connected_channels=[], permissions=[perm])
+    assert decision.allowed is False
+    assert "missing from storage" in decision.reason
+
+
+def test_rights_verification_levels() -> None:
+    """Owner & CC must be 'api_verified'; Campaign & Permission must be 'self_attested'."""
+    # Owner
+    owner_vid = _make_video(channel_id="UC_OWNED_001")
+    ch = _make_connected_channel("UC_OWNED_001")
+    owner_dec = evaluate_rights(video=owner_vid, connected_channels=[ch])
+    assert owner_dec.allowed is True
+    assert owner_dec.verification_level == "api_verified"
+    assert owner_dec.evidence["verification_level"] == "api_verified"
+
+    # CC
+    cc_vid = _make_video(license_name="creativeCommon")
+    cc_dec = evaluate_rights(video=cc_vid, connected_channels=[])
+    assert cc_dec.allowed is True
+    assert cc_dec.verification_level == "api_verified"
+    assert cc_dec.evidence["verification_level"] == "api_verified"
+
+    # Campaign
+    camp_vid = _make_video(video_id="campVid2")
+    camp = _make_campaign(video_ids=["campVid2"])
+    camp_dec = evaluate_rights(video=camp_vid, connected_channels=[], campaign=camp)
+    assert camp_dec.allowed is True
+    assert camp_dec.verification_level == "self_attested"
+    assert camp_dec.evidence["verification_level"] == "self_attested"
+
+    # Permission
+    perm_vid = _make_video(channel_id="UC_PERM_002")
+    perm = _make_permission("UC_PERM_002", scope="YouTube Shorts only")
+    perm_dec = evaluate_rights(video=perm_vid, connected_channels=[], permissions=[perm])
+    assert perm_dec.allowed is True
+    assert perm_dec.verification_level == "self_attested"
+    assert perm_dec.evidence["verification_level"] == "self_attested"
+    assert perm_dec.evidence["scope"] == "YouTube Shorts only"
+
+
+def test_reverify_job_rights_blocks_when_video_private(db_session: Session) -> None:
+    """Re-check before upload must block if video has become private."""
+    user = User(
+        id=uuid.uuid4(),
+        email="test_private@example.com",
+        google_sub="gid_private",
+    )
+    db_session.add(user)
+    job = Job(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        source_url="https://www.youtube.com/watch?v=privVid01",
+        youtube_video_id="privVid01",
+        rights_basis=RightsBasis.OWNER.value,
+        rights_evidence_json={"allowed": True, "basis": "owner"},
+        status=JobStatus.READY.value,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    class PrivateVideoYouTubeService:
+        def fetch_video_metadata(self, video_id: str, access_token: str | None = None) -> VideoMetadata:
+            return VideoMetadata(
+                video_id=video_id,
+                channel_id="UC_ANY",
+                channel_title="Any",
+                title="Private Video",
+                license="youtube",
+                duration_sec=300,
+                privacy_status="private",
+            )
+
+    with pytest.raises(RightsGateError, match="private or unavailable"):
+        reverify_job_rights(
+            db_session,
+            job=job,
+            youtube_service=PrivateVideoYouTubeService(),  # type: ignore[arg-type]
+        )
+
 

@@ -2,7 +2,7 @@
 
 import { shouldSuggestFileUpload } from "@/lib/api";
 import type { JobItem } from "@/lib/types";
-import { RightsBasisBadge, StatusBadge } from "./Badges";
+import { RightsBasisBadge, StatusBadge, VerificationLevelBadge } from "./Badges";
 
 interface JobsListProps {
   jobs: JobItem[];
@@ -80,6 +80,13 @@ export function JobsList({
                     )}
                     <StatusBadge status={job.status} />
                     <RightsBasisBadge basis={job.rights_basis} />
+                    <VerificationLevelBadge
+                      level={
+                        job.verification_level ||
+                        ((job.rights_evidence_json as Record<string, unknown> | undefined)
+                          ?.verification_level as string | undefined)
+                      }
+                    />
                   </div>
                 </div>
 

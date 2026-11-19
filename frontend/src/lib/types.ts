@@ -8,6 +8,8 @@ export type JobStatus =
 
 export type RightsBasis = "owner" | "campaign" | "cc" | "permission";
 
+export type VerificationLevel = "api_verified" | "self_attested";
+
 export type ReviewStatus = "pending" | "approved" | "rejected";
 
 export type SourceMode = "url" | "uploaded_file";
@@ -55,6 +57,10 @@ export interface Campaign {
   rules_text: string;
   deadline: string | null;
   is_active: boolean;
+  proof_url?: string | null;
+  proof_document_path?: string | null;
+  proof_document_sha256?: string | null;
+  attested_at?: string | null;
   created_at: string;
   updated_at: string;
   sources: CampaignSource[];
@@ -67,6 +73,7 @@ export interface PermissionDoc {
   channel_name: string | null;
   original_filename: string;
   document_sha256: string;
+  scope?: string | null;
   notes: string | null;
   expires_at: string | null;
   revoked: boolean;
@@ -118,6 +125,7 @@ export interface JobItem {
   source_duration_sec: number | null;
   campaign_id: string | null;
   rights_basis: RightsBasis | null;
+  verification_level?: VerificationLevel | null;
   rights_evidence_json: Record<string, unknown>;
   rejection_reason: string | null;
   settings_json: Record<string, unknown>;

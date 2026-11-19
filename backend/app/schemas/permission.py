@@ -19,6 +19,7 @@ class PermissionResponse(BaseModel):
     channel_name: str | None = None
     original_filename: str
     document_sha256: str
+    scope: str | None = None
     notes: str | None = None
     expires_at: datetime | None = None
     revoked: bool

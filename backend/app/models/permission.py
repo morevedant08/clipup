@@ -36,6 +36,7 @@ class Permission(Base):
     document_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    scope: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -4,16 +4,28 @@ Rights-safe automated video clipping platform.
 
 Paste a YouTube URL (optionally linked to a paid clipping campaign), let Clipper verify your legal right to clip the video through a strict **Rights Gate**, generate vertical 9:16 short clips via a swappable clipping engine, and review them before any future publishing workflow.
 
-## Non-Negotiable Rights Gate
+## Non-Negotiable Rights Gate (Hardened)
 
 No clipping job can be queued, downloaded, or processed unless the source video passes at least one of four allowed rights bases (evaluated in `backend/app/services/rights.py` and re-checked inside the Celery worker before `yt-dlp` runs):
 
-1. **`owner`** — The video's YouTube `channelId` matches one of your connected YouTube channels (`youtube_channels`, refresh tokens stored Fernet-encrypted).
-2. **`campaign`** — The video URL (normalized video ID or channel) is listed in the selected active campaign's authorized sources (`campaign_sources`) and is within the campaign deadline.
-3. **`cc`** — YouTube Data API v3 (`videos.list`, `part=status,snippet,contentDetails`) returns `status.license == "creativeCommon"`. Automatically sets `requires_attribution = true` and attaches mandatory attribution text to every generated clip.
-4. **`permission`** — You uploaded a non-revoked, non-expired written permission document (`permissions`) covering the video's `channelId`.
+1. **`owner`** (`api_verified`) — The video's YouTube `channelId` matches one of your connected YouTube channels (`youtube_channels`, refresh tokens stored Fernet-encrypted).
+2. **`campaign`** (`self_attested`) — The video URL (normalized video ID or channel) is listed in the selected active campaign's authorized sources (`campaign_sources`), is within the campaign deadline, and has required authorization proof (terms URL or uploaded proof document with SHA-256) plus an attestation timestamp. Campaigns are strictly scoped to the owner user; referencing another user's campaign returns `404 Not Found`.
+3. **`cc`** (`api_verified`) — YouTube Data API v3 (`videos.list`, `part=status,snippet,contentDetails`) returns `status.license == "creativeCommon"`. Automatically sets `requires_attribution = true` and attaches mandatory attribution text to every generated clip.
+4. **`permission`** (`self_attested`) — You uploaded a non-revoked, non-expired written permission document (`permissions`) covering the video's `channelId`, verified to exist on disk in storage, with an optional free-text scope.
 
 If none match, the job is saved with `status = "rejected"`, a human-readable `rejection_reason`, full `rights_evidence_json`, and an `audit_log` entry. It is never enqueued to Celery.
+
+### Rights Gate Hardening & Verification Levels
+
+- **Verification Levels**: Every approved job records `verification_level` in its evidence:
+  - `api_verified` for `owner` and `cc` (verified directly via Google/YouTube API).
+  - `self_attested` for `campaign` and `permission` (user-attested terms or written documentation).
+  - Displayed as green (`API Verified`) or amber (`Self-Attested`) badges across the UI.
+  - **Explicit Confirmation Checkbox**: Uploads for `self_attested` clips require the user to check an explicit rights confirmation checkbox before the upload can be queued.
+- **Fail-Closed Pre-Upload Re-Check**: The pre-upload Rights Gate re-check fails closed: any exception, missing/deleted video, video becoming private, or non-allowed decision immediately blocks the upload, marks it `failed`, and records `upload.rights_blocked` in `audit_log`.
+- **Campaign Scope & Proof**: Campaigns are strictly private to the owner user (`campaign.owner_user_id == current_user.id`). Other users' campaign IDs return 404 across all endpoints. Creating a campaign requires a terms URL (`proof_url`) or uploaded proof file (storing its SHA-256) and an attestation timestamp.
+- **Permission Document Integrity**: Permission evaluation verifies the physical document file exists on disk within `STORAGE_ROOT`, and records the document's `scope` in rights evidence.
+- **Source File Duration Validation**: When uploading a source file, Clipper probes the file's duration using `ffprobe` against the verified YouTube video's duration (5s / 5% tolerance), stores `uploaded_source_sha256` in job evidence, and rejects duration mismatches with `400 Bad Request`.
 
 ### Optional Source File Upload Path
 
@@ -29,7 +41,7 @@ If none match, the job is saved with `status = "rejected"`, a human-readable `re
 ```text
 .
 ├── backend/
-│   ├── alembic/                  # Alembic migrations (0001_initial_schema)
+│   ├── alembic/                  # Alembic migrations (0001_initial_schema, 0002_add_uploads_table, 0003_harden_rights_gate)
 │   ├── app/
 │   │   ├── api/                  # health, auth, campaigns, permissions, jobs
 │   │   ├── models/               # SQLAlchemy 2.x models

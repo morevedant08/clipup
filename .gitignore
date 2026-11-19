@@ -27,6 +27,7 @@ build/
 node_modules/
 frontend/.next/
 frontend/out/
+*.tsbuildinfo
 .DS_Store
 
 celerybeat-schedule*

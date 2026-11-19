@@ -18,6 +18,7 @@ class UploadCreateRequest(BaseModel):
     privacy: Literal["private", "unlisted", "public"] = "private"
     channel_id: uuid.UUID | None = None
     scheduled_at: datetime | None = None
+    self_attested_confirmed: bool = Field(default=False)
 
 
 class UploadResponse(BaseModel):

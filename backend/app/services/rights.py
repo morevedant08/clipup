@@ -17,9 +17,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy.orm import Session, selectinload
+
+from app.config import get_settings
 
 from app.models.campaign import Campaign
 from app.models.job import Job, RightsBasis
@@ -47,6 +49,7 @@ class RightsDecision:
     requires_attribution: bool
     attribution_text: str | None
     evidence: dict[str, Any]
+    verification_level: Literal["api_verified", "self_attested"] | None = None
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -86,6 +89,7 @@ def evaluate_rights(
             evidence={
                 "allowed": False,
                 "basis": None,
+                "verification_level": None,
                 "checked_at": checked_at.isoformat(),
                 "video_id": video.video_id,
                 "channel_id": video.channel_id,
@@ -93,6 +97,7 @@ def evaluate_rights(
                 "reason": reason,
                 "checks_evaluated": checks_evaluated,
             },
+            verification_level=None,
         )
 
     base_evidence: dict[str, Any] = {
@@ -130,6 +135,7 @@ def evaluate_rights(
                 **base_evidence,
                 "allowed": True,
                 "basis": RightsBasis.OWNER.value,
+                "verification_level": "api_verified",
                 "requires_attribution": False,
                 "matched_channel_record_id": str(matched_channel.id),
                 "matched_channel_id": matched_channel.channel_id,
@@ -137,6 +143,7 @@ def evaluate_rights(
                 "reason": reason,
                 "checks_evaluated": checks_evaluated,
             },
+            verification_level="api_verified",
         )
     checks_evaluated["owner"] = {
         "passed": False,
@@ -157,66 +164,88 @@ def evaluate_rights(
                 "detail": rule_eval.reason,
             }
         else:
-            matched_source = next(
-                (
-                    src
-                    for src in campaign.sources
-                    if (
-                        src.normalized_video_id
-                        and src.normalized_video_id == video.video_id
-                    )
-                    or (
-                        src.source_type == "channel"
-                        and src.source_channel_id
-                        and src.source_channel_id == video.channel_id
-                    )
-                ),
-                None,
-            )
-            if matched_source is not None:
-                reason = (
-                    f"Authorized under campaign '{campaign.name}': video matches "
-                    f"listed campaign source ({matched_source.source_url})."
-                )
+            proof_missing_from_disk = False
+            if campaign.proof_document_path:
+                settings = get_settings()
+                doc_file = (settings.storage_path / campaign.proof_document_path).resolve()
+                if not doc_file.is_relative_to(settings.storage_path.resolve()) or not doc_file.is_file():
+                    proof_missing_from_disk = True
+
+            if proof_missing_from_disk:
                 checks_evaluated["campaign"] = {
-                    "passed": True,
+                    "passed": False,
                     "campaign_id": str(campaign.id),
                     "campaign_name": campaign.name,
-                    "matched_source_id": str(matched_source.id),
-                    "matched_source_url": matched_source.source_url,
+                    "detail": "Campaign proof document is missing from storage.",
                 }
-                return RightsDecision(
-                    allowed=True,
-                    basis=RightsBasis.CAMPAIGN,
-                    reason=reason,
-                    requires_attribution=False,
-                    attribution_text=None,
-                    evidence={
-                        **base_evidence,
-                        "allowed": True,
-                        "basis": RightsBasis.CAMPAIGN.value,
-                        "requires_attribution": False,
+            else:
+                matched_source = next(
+                    (
+                        src
+                        for src in campaign.sources
+                        if (
+                            src.normalized_video_id
+                            and src.normalized_video_id == video.video_id
+                        )
+                        or (
+                            src.source_type == "channel"
+                            and src.source_channel_id
+                            and src.source_channel_id == video.channel_id
+                        )
+                    ),
+                    None,
+                )
+                if matched_source is not None:
+                    reason = (
+                        f"Authorized under campaign '{campaign.name}': video matches "
+                        f"listed campaign source ({matched_source.source_url})."
+                    )
+                    checks_evaluated["campaign"] = {
+                        "passed": True,
                         "campaign_id": str(campaign.id),
                         "campaign_name": campaign.name,
-                        "campaign_rules_text": campaign.rules_text,
-                        "campaign_deadline": (
-                            rule_eval.deadline.isoformat() if rule_eval.deadline else None
-                        ),
                         "matched_source_id": str(matched_source.id),
                         "matched_source_url": matched_source.source_url,
-                        "reason": reason,
-                        "checks_evaluated": checks_evaluated,
-                    },
-                )
-            checks_evaluated["campaign"] = {
-                "passed": False,
-                "campaign_id": str(campaign.id),
-                "campaign_name": campaign.name,
-                "detail": (
-                    f"Video '{video.video_id}' is not listed in the authorized sources "
-                    f"of campaign '{campaign.name}'."
-                ),
-            }
+                    }
+                    return RightsDecision(
+                        allowed=True,
+                        basis=RightsBasis.CAMPAIGN,
+                        reason=reason,
+                        requires_attribution=False,
+                        attribution_text=None,
+                        evidence={
+                            **base_evidence,
+                            "allowed": True,
+                            "basis": RightsBasis.CAMPAIGN.value,
+                            "verification_level": "self_attested",
+                            "requires_attribution": False,
+                            "campaign_id": str(campaign.id),
+                            "campaign_name": campaign.name,
+                            "campaign_rules_text": campaign.rules_text,
+                            "campaign_deadline": (
+                                rule_eval.deadline.isoformat() if rule_eval.deadline else None
+                            ),
+                            "campaign_proof_url": campaign.proof_url,
+                            "campaign_proof_document_sha256": campaign.proof_document_sha256,
+                            "campaign_attested_at": (
+                                campaign.attested_at.isoformat() if campaign.attested_at else None
+                            ),
+                            "matched_source_id": str(matched_source.id),
+                            "matched_source_url": matched_source.source_url,
+                            "reason": reason,
+                            "checks_evaluated": checks_evaluated,
+                        },
+                        verification_level="self_attested",
+                    )
+                checks_evaluated["campaign"] = {
+                    "passed": False,
+                    "campaign_id": str(campaign.id),
+                    "campaign_name": campaign.name,
+                    "detail": (
+                        f"Video '{video.video_id}' is not listed in the authorized sources "
+                        f"of campaign '{campaign.name}'."
+                    ),
+                }
     else:
         checks_evaluated["campaign"] = {
             "passed": False,
@@ -250,6 +279,14 @@ def evaluate_rights(
                 "document evidence."
             )
             continue
+        settings = get_settings()
+        stored_file = (settings.storage_path / perm.document_path).resolve()
+        if not stored_file.is_relative_to(settings.storage_path.resolve()) or not stored_file.is_file():
+            permission_failure_detail = (
+                f"Written permission document '{perm.original_filename}' for channel "
+                f"'{video.channel_id}' is missing from storage."
+            )
+            continue
         valid_permission = perm
         break
 
@@ -263,6 +300,7 @@ def evaluate_rights(
             "permission_id": str(valid_permission.id),
             "document_sha256": valid_permission.document_sha256,
             "original_filename": valid_permission.original_filename,
+            "scope": valid_permission.scope,
         }
         return RightsDecision(
             allowed=True,
@@ -274,10 +312,12 @@ def evaluate_rights(
                 **base_evidence,
                 "allowed": True,
                 "basis": RightsBasis.PERMISSION.value,
+                "verification_level": "self_attested",
                 "requires_attribution": False,
                 "permission_id": str(valid_permission.id),
                 "document_sha256": valid_permission.document_sha256,
                 "original_filename": valid_permission.original_filename,
+                "scope": valid_permission.scope,
                 "expires_at": (
                     _ensure_utc(valid_permission.expires_at).isoformat()
                     if valid_permission.expires_at
@@ -286,6 +326,7 @@ def evaluate_rights(
                 "reason": reason,
                 "checks_evaluated": checks_evaluated,
             },
+            verification_level="self_attested",
         )
     checks_evaluated["permission"] = {
         "passed": False,
@@ -314,11 +355,13 @@ def evaluate_rights(
                 **base_evidence,
                 "allowed": True,
                 "basis": RightsBasis.CC.value,
+                "verification_level": "api_verified",
                 "requires_attribution": True,
                 "attribution_text": attribution,
                 "reason": reason,
                 "checks_evaluated": checks_evaluated,
             },
+            verification_level="api_verified",
         )
     checks_evaluated["cc"] = {
         "passed": False,
@@ -355,10 +398,12 @@ def evaluate_rights(
             **base_evidence,
             "allowed": False,
             "basis": None,
+            "verification_level": None,
             "requires_attribution": False,
             "reason": reason,
             "checks_evaluated": checks_evaluated,
         },
+        verification_level=None,
     )
 
 
@@ -390,7 +435,10 @@ def check_rights_for_user(
         campaign = (
             db.query(Campaign)
             .options(selectinload(Campaign.sources))
-            .filter(Campaign.id == campaign_id)
+            .filter(
+                Campaign.id == campaign_id,
+                Campaign.owner_user_id == user.id,
+            )
             .first()
         )
 
@@ -440,6 +488,10 @@ def reverify_job_rights(
         job.youtube_video_id,
         access_token=access_token,
     )
+    if video is None or getattr(video, "privacy_status", None) == "private":
+        raise RightsGateError(
+            f"Video '{job.youtube_video_id}' is private or unavailable."
+        )
     return check_rights_for_user(
         db,
         user=user,

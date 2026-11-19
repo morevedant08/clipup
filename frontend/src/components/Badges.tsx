@@ -107,3 +107,35 @@ export function UploadStatusBadge({
   );
 }
 
+export function VerificationLevelBadge({
+  level,
+}: {
+  level?: "api_verified" | "self_attested" | string | null;
+}) {
+  if (!level) return null;
+  if (level === "api_verified") {
+    return (
+      <span
+        title="Directly verified via Google / YouTube API"
+        className="inline-flex items-center rounded-full border border-emerald-600/80 bg-emerald-950/70 px-2 py-0.5 text-[11px] font-medium text-emerald-300"
+      >
+        <span className="mr-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
+        API Verified
+      </span>
+    );
+  }
+  if (level === "self_attested") {
+    return (
+      <span
+        title="Self-attested rights (campaign rules or written permission document)"
+        className="inline-flex items-center rounded-full border border-amber-600/80 bg-amber-950/70 px-2 py-0.5 text-[11px] font-medium text-amber-300"
+      >
+        <span className="mr-1 h-1.5 w-1.5 rounded-full bg-amber-400" />
+        Self-Attested
+      </span>
+    );
+  }
+  return null;
+}
+
+

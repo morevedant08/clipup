@@ -41,6 +41,10 @@ class CampaignCreate(BaseModel):
     deadline: datetime | None = None
     is_active: bool = True
     sources: list[CampaignSourceCreate] = Field(default_factory=list)
+    proof_url: str | None = Field(default=None, max_length=1024)
+    proof_document_path: str | None = Field(default=None, max_length=1024)
+    proof_document_sha256: str | None = Field(default=None, max_length=64)
+    attested: bool = Field(default=False)
 
 
 class CampaignUpdate(BaseModel):
@@ -52,6 +56,10 @@ class CampaignUpdate(BaseModel):
     deadline: datetime | None = None
     is_active: bool | None = None
     sources: list[CampaignSourceCreate] | None = None
+    proof_url: str | None = Field(default=None, max_length=1024)
+    proof_document_path: str | None = Field(default=None, max_length=1024)
+    proof_document_sha256: str | None = Field(default=None, max_length=64)
+    attested: bool | None = None
 
 
 class CampaignResponse(BaseModel):
@@ -66,6 +74,10 @@ class CampaignResponse(BaseModel):
     rules_text: str
     deadline: datetime | None = None
     is_active: bool
+    proof_url: str | None = None
+    proof_document_path: str | None = None
+    proof_document_sha256: str | None = None
+    attested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     sources: list[CampaignSourceResponse] = Field(default_factory=list)

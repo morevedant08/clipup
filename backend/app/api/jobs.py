@@ -31,6 +31,7 @@ from app.schemas.clip import ClipResponse, ClipReviewUpdate
 from app.schemas.job import JobCreateRequest, JobResponse
 from app.security import TokenCipher
 from app.services.audit import record_audit
+from app.services.engines.stub import probe_video_duration
 from app.services.rights import check_rights_for_user
 from app.services.uploads import (
     VideoUploadValidationError,
@@ -94,6 +95,7 @@ def _serialize_job(job: Job) -> JobResponse:
         source_duration_sec=job.source_duration_sec,
         campaign_id=job.campaign_id,
         rights_basis=job.rights_basis,
+        verification_level=(job.rights_evidence_json or {}).get("verification_level"),
         rights_evidence_json=job.rights_evidence_json,
         rejection_reason=job.rejection_reason,
         settings_json=public_settings,
@@ -237,7 +239,12 @@ async def create_job(
 
     if payload.campaign_id is not None:
         campaign_exists = (
-            db.query(Campaign.id).filter(Campaign.id == payload.campaign_id).first()
+            db.query(Campaign.id)
+            .filter(
+                Campaign.id == payload.campaign_id,
+                Campaign.owner_user_id == current_user.id,
+            )
+            .first()
         )
         if campaign_exists is None:
             if source_file is not None:
@@ -333,6 +340,35 @@ async def create_job(
                 status_code=exc.status_code,
                 detail=exc.message,
             ) from exc
+
+        uploaded_file_path = settings.storage_path / uploaded.relative_path
+        try:
+            uploaded_duration = probe_video_duration(uploaded_file_path)
+        except Exception as exc:
+            uploaded_file_path.unlink(missing_ok=True)
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unable to probe duration of uploaded video file: {exc}",
+            ) from exc
+
+        if video_meta.duration_sec and video_meta.duration_sec > 0:
+            tolerance = max(5.0, video_meta.duration_sec * 0.05)
+            if abs(uploaded_duration - video_meta.duration_sec) > tolerance:
+                uploaded_file_path.unlink(missing_ok=True)
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Uploaded video duration ({uploaded_duration:.1f}s) does not match "
+                        f"verified YouTube video duration ({video_meta.duration_sec:.1f}s)."
+                    ),
+                )
+
+        evidence = dict(job.rights_evidence_json or {})
+        evidence["uploaded_source_sha256"] = uploaded.sha256
+        evidence["uploaded_source_duration_sec"] = uploaded_duration
+        job.rights_evidence_json = evidence
 
         source_mode = "uploaded_file"
         job.settings_json = {

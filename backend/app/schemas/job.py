@@ -41,6 +41,7 @@ class JobResponse(BaseModel):
     source_duration_sec: int | None = None
     campaign_id: uuid.UUID | None = None
     rights_basis: str | None = None
+    verification_level: str | None = None
     rights_evidence_json: dict[str, Any] = Field(default_factory=dict)
     rejection_reason: str | None = None
     settings_json: dict[str, Any] = Field(default_factory=dict)

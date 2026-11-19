@@ -405,7 +405,7 @@ def execute_clip_upload(
         db.refresh(upload)
         return upload
 
-    # 4. NON-NEGOTIABLE: Re-run live Rights Gate IMMEDIATELY before uploading
+    # 4. NON-NEGOTIABLE: Re-run live Rights Gate IMMEDIATELY before uploading (fail-closed)
     try:
         decision = reverify_job_rights(
             db,
@@ -414,27 +414,11 @@ def execute_clip_upload(
             access_token=access_token,
             now=now,
         )
-    except RightsGateError as exc:
+        if not decision.allowed or decision.basis is None:
+            raise RightsGateError(f"Rights Gate rejected: {decision.reason}")
+    except Exception as exc:
         upload.status = UploadStatus.FAILED.value
         upload.error = f"Upload blocked by Rights Gate: {exc}"
-        record_audit(
-            db,
-            "upload.rights_blocked",
-            user_id=upload.user_id,
-            job_id=upload.job_id,
-            details={"upload_id": str(upload.id), "reason": str(exc)},
-        )
-        db.commit()
-        db.refresh(upload)
-        return upload
-    except YouTubeAPIError as exc:
-        raise YouTubeTransientUploadError(
-            f"Unable to re-verify rights with YouTube before upload: {exc}"
-        ) from exc
-
-    if not decision.allowed or decision.basis is None:
-        upload.status = UploadStatus.FAILED.value
-        upload.error = f"Upload blocked by Rights Gate: {decision.reason}"
         record_audit(
             db,
             "upload.rights_blocked",
@@ -443,7 +427,7 @@ def execute_clip_upload(
             details={
                 "upload_id": str(upload.id),
                 "clip_id": str(upload.clip_id),
-                "reason": decision.reason,
+                "reason": str(exc),
             },
         )
         db.commit()

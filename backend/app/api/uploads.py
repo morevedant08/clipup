@@ -174,6 +174,17 @@ def queue_clip_upload(
     channel = _resolve_upload_channel(db, current_user, payload.channel_id)
     job = clip.job
 
+    # Require explicit confirmation checkbox for self-attested jobs
+    job_verification_level = (job.rights_evidence_json or {}).get("verification_level")
+    if job_verification_level == "self_attested" and not payload.self_attested_confirmed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This clip relies on a self-attested rights basis. You must explicitly "
+                "confirm rights attestation before uploading."
+            ),
+        )
+
     # Obtain an access token if needed for live YouTube metadata lookup (when API key is absent)
     settings = get_settings()
     access_token: str | None = None
@@ -202,7 +213,7 @@ def queue_clip_upload(
                 detail="Unable to refresh YouTube OAuth token for pre-upload check.",
             ) from exc
 
-    # NON-NEGOTIABLE: Re-run the live Rights Gate right before queueing the upload
+    # NON-NEGOTIABLE: Re-run the live Rights Gate right before queueing the upload (fail-closed)
     try:
         decision = reverify_job_rights(
             db,
@@ -210,18 +221,9 @@ def queue_clip_upload(
             youtube_service=youtube_service,
             access_token=access_token,
         )
-    except RightsGateError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
-        ) from exc
-    except YouTubeAPIError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Unable to re-verify video rights with YouTube: {exc}",
-        ) from exc
-
-    if not decision.allowed or decision.basis is None:
+        if not decision.allowed or decision.basis is None:
+            raise RightsGateError(f"Rights Gate rejected: {decision.reason}")
+    except Exception as exc:
         record_audit(
             db,
             "upload.rights_blocked",
@@ -229,13 +231,22 @@ def queue_clip_upload(
             job_id=job.id,
             details={
                 "clip_id": str(clip.id),
-                "reason": decision.reason,
+                "reason": str(exc),
             },
         )
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Upload blocked by Rights Gate: {decision.reason}",
+            detail=f"Upload blocked by Rights Gate: {exc}",
+        ) from exc
+
+    if decision.verification_level == "self_attested" and not payload.self_attested_confirmed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This clip relies on a self-attested rights basis. You must explicitly "
+                "confirm rights attestation before uploading."
+            ),
         )
 
     cc_attribution = (

@@ -137,13 +137,25 @@ export async function fetchCampaigns(): Promise<Campaign[]> {
   return apiFetch<Campaign[]>("/api/campaigns");
 }
 
-export async function createCampaign(payload: {
-  name: string;
-  description?: string;
-  rules_text: string;
-  deadline?: string | null;
-  sources: { source_url: string; title?: string }[];
-}): Promise<Campaign> {
+export async function createCampaign(
+  payload:
+    | {
+        name: string;
+        description?: string;
+        rules_text: string;
+        deadline?: string | null;
+        proof_url?: string | null;
+        attested: boolean;
+        sources: { source_url: string; title?: string }[];
+      }
+    | FormData
+): Promise<Campaign> {
+  if (payload instanceof FormData) {
+    return apiFetch<Campaign>("/api/campaigns", {
+      method: "POST",
+      body: payload,
+    });
+  }
   return apiFetch<Campaign>("/api/campaigns", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -254,6 +266,7 @@ export async function queueClipUpload(
     tags: string[];
     privacy: UploadPrivacy;
     scheduled_at?: string | null;
+    self_attested_confirmed?: boolean;
   }
 ): Promise<UploadItem> {
   return apiFetch<UploadItem>(

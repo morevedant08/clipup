@@ -19,6 +19,7 @@ import {
   RightsBasisBadge,
   StatusBadge,
   UploadStatusBadge,
+  VerificationLevelBadge,
 } from "./Badges";
 
 interface ClipPreviewGridProps {
@@ -34,6 +35,7 @@ interface UploadDraft {
   tagsRaw: string;
   privacy: UploadPrivacy;
   scheduledAt: string;
+  selfAttestedConfirmed: boolean;
 }
 
 function formatSeconds(sec: number): string {
@@ -48,6 +50,11 @@ export function ClipPreviewGrid({
   onClipUpdated,
   onUploadQueued,
 }: ClipPreviewGridProps) {
+  const isSelfAttested =
+    job.verification_level === "self_attested" ||
+    ((job.rights_evidence_json as Record<string, unknown> | undefined)
+      ?.verification_level === "self_attested");
+
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [openUploadClipId, setOpenUploadClipId] = useState<string | null>(null);
@@ -84,6 +91,7 @@ export function ClipPreviewGrid({
           tagsRaw: "Shorts",
           privacy: "private",
           scheduledAt: "",
+          selfAttestedConfirmed: false,
         },
       };
     });
@@ -100,6 +108,7 @@ export function ClipPreviewGrid({
           tagsRaw: "",
           privacy: "private",
           scheduledAt: "",
+          selfAttestedConfirmed: false,
         }),
         ...patch,
       },
@@ -133,6 +142,7 @@ export function ClipPreviewGrid({
         tags,
         privacy: draft.privacy,
         scheduled_at: scheduledIso,
+        self_attested_confirmed: draft.selfAttestedConfirmed,
       });
       onUploadQueued(job.id, clip.id, created);
       setOpenUploadClipId(null);
@@ -171,6 +181,13 @@ export function ClipPreviewGrid({
           )}
           <StatusBadge status={job.status} />
           <RightsBasisBadge basis={job.rights_basis} />
+          <VerificationLevelBadge
+            level={
+              job.verification_level ||
+              ((job.rights_evidence_json as Record<string, unknown> | undefined)
+                ?.verification_level as string | undefined)
+            }
+          />
         </div>
       </div>
 
@@ -456,6 +473,27 @@ export function ClipPreviewGrid({
                               </div>
                             </div>
 
+                            {isSelfAttested && (
+                              <div className="rounded-lg border border-amber-800/80 bg-amber-950/40 p-2.5">
+                                <label className="flex items-start gap-2 text-[11px] text-amber-200 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    required
+                                    checked={draft.selfAttestedConfirmed || false}
+                                    onChange={(e) =>
+                                      updateDraft(clip.id, {
+                                        selfAttestedConfirmed: e.target.checked,
+                                      })
+                                    }
+                                    className="mt-0.5 h-3.5 w-3.5 rounded border-slate-700 bg-slate-900 text-amber-600 focus:ring-amber-500"
+                                  />
+                                  <span>
+                                    <strong>Rights Confirmation:</strong> I confirm and attest that I hold valid clipping rights for this video under this self-attested basis ({job.rights_basis}).
+                                  </span>
+                                </label>
+                              </div>
+                            )}
+
                             {clipUploadError && (
                               <p className="rounded-md border border-rose-800/80 bg-rose-950/60 p-2 text-[11px] text-rose-200">
                                 {clipUploadError}
@@ -464,7 +502,11 @@ export function ClipPreviewGrid({
 
                             <button
                               type="submit"
-                              disabled={!uploadEnabled || uploadingClipId === clip.id}
+                              disabled={
+                                !uploadEnabled ||
+                                uploadingClipId === clip.id ||
+                                (isSelfAttested && !draft.selfAttestedConfirmed)
+                              }
                               className="w-full rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
                             >
                               {uploadingClipId === clip.id
