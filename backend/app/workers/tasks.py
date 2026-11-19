@@ -190,8 +190,13 @@ def execute_clipping_job(
             clip_duration_sec=int(
                 job_cfg.get("clip_duration_sec", settings.default_clip_duration_sec)
             ),
+            min_clip_duration_sec=int(job_cfg.get("min_clip_duration_sec", 20)),
+            max_clip_duration_sec=int(job_cfg.get("max_clip_duration_sec", 60)),
             aspect_ratio=str(job_cfg.get("aspect_ratio", "9:16")),
+            blurred_background=bool(job_cfg.get("blurred_background", False)),
             source_title=job.source_title,
+            job_id=str(job.id),
+            extra={"rights_basis": job.rights_basis},
         )
 
         results = clip_engine.create_clips(source_path, clip_settings)
@@ -216,6 +221,9 @@ def execute_clipping_job(
                 start_sec=result.start_sec,
                 end_sec=result.end_sec,
                 score=result.score,
+                reason=result.reason,
+                transcript_excerpt=result.transcript_excerpt,
+                metadata_json=result.metadata_json or {},
                 title=result.title,
                 attribution_text=cc_attribution,
                 review_status=ReviewStatus.PENDING.value,

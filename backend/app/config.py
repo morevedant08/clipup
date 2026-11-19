@@ -55,10 +55,16 @@ class Settings(BaseSettings):
     # Media storage & clipping
     storage_root: str = Field(default="./storage")
     max_upload_size_mb: int = Field(default=500, ge=1)
-    clip_engine: str = Field(default="stub")
+    clip_engine: str = Field(default="local")
     max_video_duration_sec: int = Field(default=7200)
     default_clip_count: int = Field(default=3)
     default_clip_duration_sec: int = Field(default=30)
+
+    # LocalEngine: Whisper transcription & Claude scoring
+    anthropic_api_key: str = Field(default="")
+    anthropic_model: str = Field(default="claude-sonnet-5-5")
+    whisper_model: str = Field(default="small")
+    max_transcript_chars: int = Field(default=150000, ge=1000)
 
     @property
     def max_upload_size_bytes(self) -> int:

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import AuditLog, Job, JobStatus, RightsBasis, User
-from app.services.engines.base import ClipSettings, get_clip_engine
+from app.services.engines.base import ClipEngineError, ClipSettings, get_clip_engine
 from app.services.engines.local import LocalEngine
 from app.services.engines.stub import StubEngine, compute_even_segments
 from app.services.rights import RightsGateError
@@ -83,10 +83,10 @@ def test_compute_even_segments_handles_long_and_short_videos() -> None:
     assert short_segs == [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)]
 
 
-def test_local_engine_is_documented_todo() -> None:
+def test_local_engine_instantiation_and_source_validation() -> None:
     engine = get_clip_engine("local")
     assert isinstance(engine, LocalEngine)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ClipEngineError, match="Source video file does not exist"):
         engine.create_clips(Path("dummy.mp4"), ClipSettings(output_dir=Path("out")))
 
 

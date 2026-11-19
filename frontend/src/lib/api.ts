@@ -202,7 +202,10 @@ export async function createJob(payload: {
   settings: {
     clip_count: number;
     clip_duration_sec: number;
+    min_clip_duration_sec?: number;
+    max_clip_duration_sec?: number;
     aspect_ratio: "9:16";
+    blurred_background?: boolean;
   };
   source_file?: File | null;
 }): Promise<JobItem> {
@@ -217,6 +220,24 @@ export async function createJob(payload: {
       "clip_duration_sec",
       String(payload.settings.clip_duration_sec)
     );
+    if (payload.settings.min_clip_duration_sec !== undefined) {
+      formData.append(
+        "min_clip_duration_sec",
+        String(payload.settings.min_clip_duration_sec)
+      );
+    }
+    if (payload.settings.max_clip_duration_sec !== undefined) {
+      formData.append(
+        "max_clip_duration_sec",
+        String(payload.settings.max_clip_duration_sec)
+      );
+    }
+    if (payload.settings.blurred_background !== undefined) {
+      formData.append(
+        "blurred_background",
+        String(payload.settings.blurred_background)
+      );
+    }
     formData.append("aspect_ratio", payload.settings.aspect_ratio);
     formData.append("source_file", payload.source_file);
     return apiFetch<JobItem>("/api/jobs", {

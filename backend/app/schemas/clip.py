@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.upload import UploadResponse
 
@@ -23,6 +23,9 @@ class ClipResponse(BaseModel):
     start_sec: float
     end_sec: float
     score: float | None = None
+    reason: str | None = None
+    transcript_excerpt: str | None = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
     title: str | None = None
     attribution_text: str | None = None
     review_status: str

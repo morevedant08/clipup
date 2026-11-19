@@ -16,7 +16,10 @@ class JobSettings(BaseModel):
 
     clip_count: int = Field(default=3, ge=1, le=20)
     clip_duration_sec: int = Field(default=30, ge=5, le=180)
+    min_clip_duration_sec: int = Field(default=20, ge=5, le=120)
+    max_clip_duration_sec: int = Field(default=60, ge=10, le=180)
     aspect_ratio: Literal["9:16"] = "9:16"
+    blurred_background: bool = Field(default=False)
 
 
 class JobCreateRequest(BaseModel):

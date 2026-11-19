@@ -22,6 +22,9 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
   const [campaignId, setCampaignId] = useState<string>("");
   const [clipCount, setClipCount] = useState<number>(3);
   const [clipDuration, setClipDuration] = useState<number>(30);
+  const [minClipDuration, setMinClipDuration] = useState<number>(20);
+  const [maxClipDuration, setMaxClipDuration] = useState<number>(60);
+  const [blurredBackground, setBlurredBackground] = useState<boolean>(false);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -50,7 +53,10 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
         settings: {
           clip_count: clipCount,
           clip_duration_sec: clipDuration,
+          min_clip_duration_sec: minClipDuration,
+          max_clip_duration_sec: maxClipDuration,
           aspect_ratio: "9:16",
+          blurred_background: blurredBackground,
         },
         source_file: sourceFile,
       });
@@ -205,7 +211,7 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
                 htmlFor="clip-duration"
                 className="mb-1 block text-xs text-slate-400"
               >
-                Target length (sec)
+                Target (sec)
               </label>
               <input
                 id="clip-duration"
@@ -214,9 +220,55 @@ export function NewJobForm({ campaigns, onJobCreated }: NewJobFormProps) {
                 max={120}
                 value={clipDuration}
                 onChange={(e) => setClipDuration(Number(e.target.value) || 30)}
-                className="w-28 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                className="w-24 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
               />
             </div>
+
+            <div>
+              <label
+                htmlFor="min-clip-duration"
+                className="mb-1 block text-xs text-slate-400"
+              >
+                Min length (sec)
+              </label>
+              <input
+                id="min-clip-duration"
+                type="number"
+                min={5}
+                max={120}
+                value={minClipDuration}
+                onChange={(e) => setMinClipDuration(Number(e.target.value) || 20)}
+                className="w-24 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="max-clip-duration"
+                className="mb-1 block text-xs text-slate-400"
+              >
+                Max length (sec)
+              </label>
+              <input
+                id="max-clip-duration"
+                type="number"
+                min={10}
+                max={180}
+                value={maxClipDuration}
+                onChange={(e) => setMaxClipDuration(Number(e.target.value) || 60)}
+                className="w-24 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <label className="flex items-center gap-2 cursor-pointer pb-2 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={blurredBackground}
+                onChange={(e) => setBlurredBackground(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-indigo-500"
+              />
+              <span>Fit horizontal video with blurred background</span>
+            </label>
 
             <div className="pb-2 text-xs text-slate-500">
               Format: <span className="font-medium text-slate-300">9:16 Vertical (1080×1920)</span>

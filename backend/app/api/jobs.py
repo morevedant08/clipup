@@ -77,6 +77,9 @@ def _serialize_job(job: Job) -> JobResponse:
             start_sec=clip.start_sec,
             end_sec=clip.end_sec,
             score=clip.score,
+            reason=clip.reason,
+            transcript_excerpt=clip.transcript_excerpt,
+            metadata_json=clip.metadata_json or {},
             title=clip.title,
             attribution_text=clip.attribution_text,
             review_status=clip.review_status,
@@ -164,7 +167,14 @@ async def _parse_job_create_request(
                     detail="Invalid JSON in 'settings' field.",
                 ) from exc
 
-        for field_name in ("clip_count", "clip_duration_sec", "aspect_ratio"):
+        for field_name in (
+            "clip_count",
+            "clip_duration_sec",
+            "min_clip_duration_sec",
+            "max_clip_duration_sec",
+            "aspect_ratio",
+            "blurred_background",
+        ):
             raw_val = form.get(field_name)
             if isinstance(raw_val, str) and raw_val.strip():
                 settings_data[field_name] = raw_val.strip()

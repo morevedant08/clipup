@@ -57,6 +57,7 @@ export function ClipPreviewGrid({
 
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<"score" | "time">("score");
   const [openUploadClipId, setOpenUploadClipId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, UploadDraft>>({});
   const [uploadingClipId, setUploadingClipId] = useState<string | null>(null);
@@ -238,58 +239,131 @@ export function ClipPreviewGrid({
               : "No clips available for this job."}
         </div>
       ) : (
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {job.clips.map((clip) => {
-            const videoUrl = buildMediaUrl(clip.preview_url);
-            const latestUpload = clip.latest_upload || null;
-            const isUploadEditorOpen = openUploadClipId === clip.id;
-            const draft = drafts[clip.id];
-            const clipUploadError = uploadErrors[clip.id];
-
-            return (
-              <div
-                key={clip.id}
-                className="flex flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-950"
+        <>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-2.5">
+            <span className="text-xs font-medium text-slate-400">
+              {job.clips.length} clip{job.clips.length === 1 ? "" : "s"} generated
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">Sort by:</span>
+              <button
+                type="button"
+                onClick={() => setSortBy("score")}
+                className={`rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+                  sortBy === "score"
+                    ? "bg-indigo-600 text-white"
+                    : "bg-slate-800 text-slate-400 hover:text-white"
+                }`}
               >
-                <div className="relative aspect-[9/16] w-full bg-black">
-                  {videoUrl ? (
-                    <video
-                      src={videoUrl}
-                      controls
-                      preload="metadata"
-                      className="h-full w-full object-contain"
-                    />
-                  ) : (
-                    <div className="flex h-full items-center justify-center text-xs text-slate-500">
-                      Preview unavailable
-                    </div>
-                  )}
-                </div>
+                Highest Score
+              </button>
+              <button
+                type="button"
+                onClick={() => setSortBy("time")}
+                className={`rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+                  sortBy === "time"
+                    ? "bg-indigo-600 text-white"
+                    : "bg-slate-800 text-slate-400 hover:text-white"
+                }`}
+              >
+                Chronological
+              </button>
+            </div>
+          </div>
 
-                <div className="flex flex-1 flex-col justify-between p-4">
-                  <div>
-                    <div className="flex items-start justify-between gap-2">
-                      <h4 className="line-clamp-2 text-sm font-medium text-white">
-                        {clip.title || "Vertical Clip"}
-                      </h4>
-                      <ReviewBadge status={clip.review_status} />
-                    </div>
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {[...job.clips]
+              .sort((a, b) => {
+                if (sortBy === "score") {
+                  const scoreA = a.score ?? 0;
+                  const scoreB = b.score ?? 0;
+                  if (scoreB !== scoreA) {
+                    return scoreB - scoreA;
+                  }
+                }
+                return a.start_sec - b.start_sec;
+              })
+              .map((clip) => {
+                const videoUrl = buildMediaUrl(clip.preview_url);
+                const latestUpload = clip.latest_upload || null;
+                const isUploadEditorOpen = openUploadClipId === clip.id;
+                const draft = drafts[clip.id];
+                const clipUploadError = uploadErrors[clip.id];
+                const isHeuristic =
+                  (clip.metadata_json as Record<string, unknown> | undefined)
+                    ?.scorer === "heuristic" ||
+                  (
+                    (clip.metadata_json as Record<string, unknown> | undefined)
+                      ?.tags as string[] | undefined
+                  )?.includes("heuristic");
 
-                    <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
-                      <span>
-                        {formatSeconds(clip.start_sec)} – {formatSeconds(clip.end_sec)}
-                      </span>
-                      {clip.score !== null && (
-                        <span>Score: {(clip.score * 100).toFixed(0)}%</span>
+                return (
+                  <div
+                    key={clip.id}
+                    className="flex flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-950"
+                  >
+                    <div className="relative aspect-[9/16] w-full bg-black">
+                      {videoUrl ? (
+                        <video
+                          src={videoUrl}
+                          controls
+                          preload="metadata"
+                          className="h-full w-full object-contain"
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-xs text-slate-500">
+                          Preview unavailable
+                        </div>
                       )}
                     </div>
 
-                    {clip.attribution_text && (
-                      <div className="mt-3 rounded-lg border border-teal-800/70 bg-teal-950/40 p-2 text-[11px] leading-relaxed text-teal-200">
-                        <span className="font-semibold">CC Attribution: </span>
-                        {clip.attribution_text}
-                      </div>
-                    )}
+                    <div className="flex flex-1 flex-col justify-between p-4">
+                      <div>
+                        <div className="flex items-start justify-between gap-2">
+                          <h4 className="line-clamp-2 text-sm font-medium text-white">
+                            {clip.title || "Vertical Clip"}
+                          </h4>
+                          <ReviewBadge status={clip.review_status} />
+                        </div>
+
+                        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                          <span>
+                            {formatSeconds(clip.start_sec)} – {formatSeconds(clip.end_sec)}
+                          </span>
+                          {clip.score !== null && (
+                            <span className="inline-flex items-center gap-1.5 rounded-md border border-indigo-700/60 bg-indigo-950/70 px-2 py-0.5 font-semibold text-indigo-300">
+                              <span>
+                                Score: {clip.score > 1 ? Math.round(clip.score) : Math.round(clip.score * 100)}/100
+                              </span>
+                              {isHeuristic && (
+                                <span className="rounded bg-indigo-900/80 px-1 py-0.2 text-[9px] uppercase tracking-wider text-indigo-200">
+                                  Heuristic
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </div>
+
+                        {clip.reason && (
+                          <div className="mt-2.5 rounded-lg border border-purple-800/50 bg-purple-950/40 p-2 text-[11px] leading-relaxed text-purple-200">
+                            <span className="font-semibold text-purple-300">Virality Analysis: </span>
+                            {clip.reason}
+                          </div>
+                        )}
+
+                        {clip.transcript_excerpt && (
+                          <div className="mt-2 rounded-lg border border-slate-800/80 bg-slate-900/50 p-2 text-[11px] leading-relaxed text-slate-300">
+                            <span className="font-semibold text-slate-400">Excerpt: </span>
+                            <span className="italic">"{clip.transcript_excerpt}"</span>
+                          </div>
+                        )}
+
+                        {clip.attribution_text && (
+                          <div className="mt-3 rounded-lg border border-teal-800/70 bg-teal-950/40 p-2 text-[11px] leading-relaxed text-teal-200">
+                            <span className="font-semibold">CC Attribution: </span>
+                            {clip.attribution_text}
+                          </div>
+                        )}
 
                     {latestUpload && (
                       <div className="mt-3 space-y-1.5 rounded-lg border border-slate-800 bg-slate-900/70 p-2.5 text-xs">
@@ -529,7 +603,8 @@ export function ClipPreviewGrid({
             );
           })}
         </div>
-      )}
+      </>
+    )}
     </section>
   );
 }

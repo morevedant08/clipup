@@ -108,11 +108,23 @@ export interface ClipItem {
   start_sec: number;
   end_sec: number;
   score: number | null;
+  reason?: string | null;
+  transcript_excerpt?: string | null;
+  metadata_json?: Record<string, unknown>;
   title: string | null;
   attribution_text: string | null;
   review_status: ReviewStatus;
   latest_upload?: UploadItem | null;
   created_at: string;
+}
+
+export interface JobSettings {
+  clip_count?: number;
+  clip_duration_sec?: number;
+  min_clip_duration_sec?: number;
+  max_clip_duration_sec?: number;
+  aspect_ratio?: string;
+  blurred_background?: boolean;
 }
 
 export interface JobItem {

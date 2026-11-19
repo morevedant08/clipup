@@ -5,9 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, Uuid
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, utcnow
@@ -45,6 +45,13 @@ class Clip(Base):
     start_sec: Mapped[float] = mapped_column(Float, nullable=False)
     end_sec: Mapped[float] = mapped_column(Float, nullable=False)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transcript_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
+    )
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     attribution_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_status: Mapped[str] = mapped_column(

@@ -15,8 +15,12 @@ class ClipSettings:
     output_dir: Path
     clip_count: int = 3
     clip_duration_sec: int = 30
+    min_clip_duration_sec: int = 20
+    max_clip_duration_sec: int = 60
     aspect_ratio: str = "9:16"
+    blurred_background: bool = False
     source_title: str | None = None
+    job_id: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -29,6 +33,9 @@ class ClipResult:
     end_sec: float
     score: float
     title: str | None = None
+    reason: str | None = None
+    transcript_excerpt: str | None = None
+    metadata_json: dict[str, Any] = field(default_factory=dict)
 
 
 class ClipEngineError(RuntimeError):

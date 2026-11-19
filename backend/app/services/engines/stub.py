@@ -174,6 +174,9 @@ class StubEngine(ClipEngine):
                     end_sec=end_sec,
                     score=score,
                     title=build_clip_title(settings.source_title, idx, total),
+                    reason=f"Evenly spaced segment {idx} of {total}",
+                    transcript_excerpt=None,
+                    metadata_json={"scorer": "stub"},
                 )
             )
 

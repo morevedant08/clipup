@@ -41,13 +41,13 @@ If none match, the job is saved with `status = "rejected"`, a human-readable `re
 ```text
 .
 ├── backend/
-│   ├── alembic/                  # Alembic migrations (0001_initial_schema, 0002_add_uploads_table, 0003_harden_rights_gate)
+│   ├── alembic/                  # Alembic migrations (0001_initial_schema .. 0004_add_clip_fields)
 │   ├── app/
 │   │   ├── api/                  # health, auth, campaigns, permissions, jobs
 │   │   ├── models/               # SQLAlchemy 2.x models
 │   │   ├── schemas/              # Pydantic v2 request/response schemas
 │   │   ├── services/             # rights.py, youtube.py, rules.py, metadata.py, audit.py
-│   │   │   └── engines/          # ClipEngine ABC, StubEngine (ffmpeg 9:16), LocalEngine (TODO)
+│   │   │   └── engines/          # ClipEngine ABC, LocalEngine (Whisper + Claude), StubEngine
 │   │   ├── workers/              # Celery app & process_clipping_job task
 │   │   ├── config.py
 │   │   ├── database.py
@@ -151,6 +151,44 @@ In Google Cloud Console (**APIs & Services**):
 4. While the app is in **Testing** publishing status (`Google Auth Platform -> Audience`), add every Google account you want to test with under **Test users** (otherwise Google blocks OAuth with `Error 403: access_denied`).
    - Note: Unverified OAuth apps in Testing mode have YouTube API uploads automatically restricted to `private` until Google app verification is completed.
 5. Sign-in (`google_login`), read-only channel connect (`youtube_connect`), and opt-in upload enablement (`youtube_upload_connect`) all share `/auth/google/callback` using a signed, short-lived, `HttpOnly`-cookie session-bound `state` token. Refresh tokens are stored Fernet-encrypted via `TOKEN_ENCRYPTION_KEY`.
+
+## Phase 2: LocalEngine (Whisper Transcription & Claude Virality Scoring)
+
+Clipper includes `LocalEngine`, the default AI-driven clipping engine (`CLIP_ENGINE=local`), combining local speech recognition with LLM virality analysis and 9:16 vertical rendering:
+
+1. **Audio Extraction & Whisper Transcription**:
+   - Audio is extracted as 16 kHz mono WAV via `ffmpeg`.
+   - Transcribed using `faster-whisper` (CPU, int8) with configurable model size (`WHISPER_MODEL`, default `small`).
+   - Produces word-level timestamps (`word.start`, `word.end`).
+   - Transcripts are cached per job under `${STORAGE_ROOT}/jobs/<job_id>/transcript.json` to avoid redundant transcription on reruns.
+2. **Sentence-Bounded Candidate Generation**:
+   - Groups words into complete sentences based on terminal punctuation (`.`, `!`, `?`).
+   - Generates candidate segments spanning contiguous sentences within the job's configurable length bounds (`min_clip_duration_sec` and `max_clip_duration_sec`, default 20–60s).
+   - Segments strictly start and end on sentence boundaries, never cutting mid-word.
+3. **Virality Scoring with Claude**:
+   - Scores candidates in batches using Anthropic's Messages API (`ANTHROPIC_API_KEY`, model `ANTHROPIC_MODEL`, default `claude-sonnet-5-5`).
+   - Evaluates:
+     1. Hook strength in the first 3 seconds
+     2. Complete idea with clear payoff
+     3. Standalone value without prior context
+     4. Emotional or informational value
+   - Parses strict JSON with automatic retry on malformed outputs.
+   - Handles API errors gracefully without failing the job, falling back to heuristic scoring.
+4. **Fallback Heuristic Scorer**:
+   - When `ANTHROPIC_API_KEY` is empty or unset, automatically scores candidates using speech density (words/sec), sentence completeness, and target duration.
+   - Tags clips with `"heuristic"` in metadata so jobs succeed without requiring third-party API keys.
+5. **Non-Overlapping Diverse Selection**:
+   - Greedily selects top N candidates by score.
+   - Enforces strict non-overlap and a minimum gap between clips (>= 3 seconds).
+   - Enforces topic diversity using token Jaccard similarity to prevent duplicate variations of the same highlight.
+   - Stores `score`, virality `reason`, and `transcript_excerpt` on each `Clip` row.
+6. **FFmpeg 9:16 Rendering & Word-Level Captions**:
+   - Renders 1080x1920 vertical video (default center-crop; optional blurred-background fit via `blurred_background`).
+   - Normalizes audio loudness to web standards using `loudnorm=I=-16:TP=-1.5:LRA=11`.
+   - Generates readable ASS subtitles grouping 2–4 words at a time with yellow/white bold styling and burns them in.
+7. **Cost & Privacy Guard**:
+   - Never logs transcripts or API keys.
+   - Enforces `MAX_TRANSCRIPT_CHARS` (default 150,000 chars) per job to control costs.
 
 ## Phase 3: Uploading Approved Clips to YouTube as Shorts
 
